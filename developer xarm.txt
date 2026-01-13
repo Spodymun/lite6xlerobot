@@ -1,0 +1,13 @@
+python - <<'EOF'
+import site
+from pathlib import Path
+
+src = "/home/nelly/src/lerobot-robot-xarm"
+sp = site.getsitepackages()[0]
+pth = Path(sp) / "lerobot_robot_xarm_dev.pth"
+pth.write_text(src + "\n")
+print("Wrote:", pth, "->", src)
+EOF
+
+-> ansonsten wurde das plugin nicht in lerobot geladen, also icht als Option angezeigt
+-> ohne das war es nicht möglich den xarm anzusteuern
