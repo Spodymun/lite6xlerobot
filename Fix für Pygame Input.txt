@@ -1,0 +1,25 @@
+✅ Fix für Pygame Input:
+
+Mach das exakt so, im (lerobot)-Env:
+
+1️⃣ X11-Dependency installieren
+sudo apt update
+sudo apt install -y python3-xlib
+
+2️⃣ pynput sauber neu installieren
+pip uninstall -y pynput
+pip install pynput
+
+3️⃣ Keyboard-Hook direkt testen
+python - <<'EOF'
+from pynput import keyboard
+print("Listening... press keys (ESC to quit)")
+def on_press(key):
+    print("press", key)
+    if key == keyboard.Key.esc:
+        return False
+with keyboard.Listener(on_press=on_press) as l:
+    l.join()
+EOF
+
+
