@@ -1,0 +1,10 @@
+python -m lerobot.scripts.lerobot_record \
+  --config_path ~/src/lite6xlerobot/configs/xarm_with_vitade.yaml \
+  --robot.ip 10.77.77.200 \
+  --teleop.type keyboard_joint \
+  --teleop.arm_action_keys '["joint1.pos","joint2.pos","joint3.pos","joint4.pos","joint5.pos","joint6.pos"]' \
+  --dataset.root ~/src/lite6xlerobot/records \
+  --dataset.repo_id xarm_cam_run1 \
+  --dataset.single_task "xArm camera teleop" \
+  --dataset.push_to_hub false \
+  --display_data true
