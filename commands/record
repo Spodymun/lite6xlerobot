@@ -4,7 +4,10 @@ python -m lerobot.scripts.lerobot_record \
   --teleop.type keyboard_joint \
   --teleop.arm_action_keys '["joint1.pos","joint2.pos","joint3.pos","joint4.pos","joint5.pos","joint6.pos"]' \
   --dataset.root ~/src/lite6xlerobot/records \
-  --dataset.repo_id xarm_cam_run1 \
+  --dataset.repo_id local/run_001 \
   --dataset.single_task "xArm camera teleop" \
   --dataset.push_to_hub false \
+  --dataset.num_episodes 1 \
+  --dataset.episode_time_s 30 \
+  --dataset.reset_time_s 0 \
   --display_data true
