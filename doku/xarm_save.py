@@ -118,10 +118,65 @@ class Xarm(Robot):
         for cam in self.cameras.values():
             cam.connect()
 
+        # Set a lower TCP speed limit for safety (Lite6 default is 1.2, i.e. 600mm/s)
+        # For example, set to 0.5 (250mm/s) for very slow/safe movement
+        code, current_factor = self._arm.get_linear_spd_limit_factor()
+        logger.info(f"Current linear speed limit factor: {current_factor}")
+        new_factor = 0.5  # 0.5*500 = 250mm/s (SAFE DEFAULT)
+        set_code = self._arm.set_linear_spd_limit_factor(new_factor)
+        # ALWAYS save configuration to persist the setting
+        self._arm.save_conf()
+        if set_code == 0:
+            logger.info(f"Set linear speed limit factor to {new_factor} (TCP limit: {new_factor*500}mm/s - SAFE)")
+        else:
+            logger.warning(f"Failed to set linear speed limit factor, code: {set_code}")
+
         self.is_connected = True
         self.configure()
         logger.info(f"{self} connected.")
         self._hold_until_ts = time.time() + 1.0  # 1 Sekunde "stabilisieren"
+
+        # Nach dem Verbinden zur Home-Position fahren
+        time.sleep(1.0)
+        if hasattr(self, 'go_home'):
+            self.go_home()
+
+    def go_home(self) -> None:
+        """Move arm to home position - slow and smooth (works!)."""
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self} is not connected.")
+
+        logger.info("Moving to home position (slow, Mode 0)...")
+        home_positions = self.config.home_joint_positions[:6]
+
+        # --- switch to Mode 0 so speed/mvacc actually apply ---
+        self._arm.set_mode(0)          # Position control mode :contentReference[oaicite:3]{index=3}
+        self._arm.set_state(0)
+        time.sleep(0.2)
+
+        # IMPORTANT: use set_servo_angle (joint motion) because it respects speed/mvacc :contentReference[oaicite:4]{index=4}
+        code = self._arm.set_servo_angle(
+            angle=home_positions,
+            speed=self.config.home_joint_speed,
+            mvacc=self.config.home_joint_acceleration,
+            is_radian=True,
+            wait=True,
+        )
+
+        if code != 0:
+            logger.warning(f"Error moving to home position, code: {code}")
+
+        # Update Jacobi with home positions so teleop doesn't revert
+        for i in range(1, 7):
+            self._jacobi.set_joint_position(f"joint{i}", home_positions[i - 1])
+
+        # --- switch back to Mode 1 for teleop streaming ---
+        self._arm.set_mode(1)          # Servoj mode :contentReference[oaicite:5]{index=5}
+        self._arm.set_state(0)
+        time.sleep(0.2)
+
+        logger.info("Home position reached (slow).")
+
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -141,10 +196,10 @@ class Xarm(Robot):
         if time.time() < self._hold_until_ts:
             code, joints = self._arm.get_servo_angle()
             if code == 0:
-                # Hold with very slow velocity during warmup
-                self._arm.set_servo_angle_j(joints[:6], velo=0.1, acc=0.2)
+                self._arm.set_servo_angle_j(joints[:6])
                 for i in range(1, 7):
                     action[f"joint{i}.pos"] = joints[i-1]
+            # gripper optional: ignorieren oder ebenfalls halten
             return action
         
         if "delta_x" in action and "delta_y" in action and "delta_z" in action:
@@ -204,11 +259,15 @@ class Xarm(Robot):
 
         if has_joints:
             joint_positions = [action[k] for k in joint_keys]
-            # Use very reduced velocity and acceleration to avoid motor blocking
-            # velo in rad/s, acc in rad/s^2
-            velo = 0.15  # Very slow
-            acc = 0.3    # Very low acceleration
-            self._arm.set_servo_angle_j(joint_positions, velo=velo, acc=acc)
+            # Ensure only 6 values, no gripper
+            joint_positions = joint_positions[:6]
+            logger.debug(f"Sending joint command: {joint_positions}")
+            # Use limited speed and acceleration for safety
+            self._arm.set_servo_angle_j(
+                angles=joint_positions,
+                speed=self.config.max_joint_speed,
+                mvacc=self.config.max_joint_acceleration
+            )
         else:
             # Nur lesen/fallback
             for i in range(1, 7):
