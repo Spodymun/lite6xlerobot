@@ -1,0 +1,42 @@
+Was war das Problem?
+
+Du wolltest pro Bewegung unterschiedliche Geschwindigkeiten setzen, aber der Arm hat sich so verhalten, als würde er nur die Geschwindigkeit aus UFACTORY Studio / Web-UI nehmen.
+
+Der Grund war: Du hattest den Arm im Mode 1 (ServoJ / “Streaming”) laufen und hast set_servo_angle_j(...) benutzt. In diesem Modus werden speed/mvacc in der Praxis nicht so angewendet, wie man es von “normalen” Bewegungsbefehlen erwartet (Servoj ist für kontinuierliche Regelung gedacht, nicht für “fahr dahin mit speed X”).
+
+Was haben wir geändert?
+
+Wir haben für die “scripted moves” (Home/Pos1/Throw) auf:
+
+Mode 0 (Position Control)
+
+set_servo_angle(...)
+
+umgestellt.
+
+Warum wirkt das?
+
+In Mode 0 + set_servo_angle sind speed und mvacc echte Bewegungsparameter:
+
+speed = maximale Gelenkgeschwindigkeit (rad/s)
+
+mvacc = Gelenkbeschleunigung (rad/s²)
+
+Und genau deshalb konntest du plötzlich sichtbar langsam vs. schnell fahren.
+
+Heißt das “wir haben einen Mode reingemacht, der langsamer ist”?
+
+Nicht ganz. Mode 0 ist nicht per se langsamer — er ist nur der Modus, in dem du Geschwindigkeit verlässlich kontrollieren kannst.
+
+In Mode 1 fährt er oft “so schnell wie erlaubt” (bzw. durch Limits gedeckelt), und deine speed= Werte werden nicht so berücksichtigt.
+
+In Mode 0 kannst du ihn langsam oder schnell machen — je nachdem, welche speed/mvacc du setzt.
+
+Das konkrete Ergebnis
+
+✅ Jetzt kannst du Home langsam, Pos1 mittel, Throw schnell fahren – reproduzierbar.
+
+✅ Du bist nicht mehr abhängig vom UI-Slider, sondern steuerst es im Code.
+
+Wenn du willst, kann ich dir auch kurz die “Faustregel” als Kommentar direkt in deinen Robot-Code schreiben, damit du später nicht wieder in die Falle läufst:
+Teleop/Streaming = Mode 1, Scripted Moves (Home/Throw) = Mode 0.

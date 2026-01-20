@@ -141,10 +141,10 @@ class Xarm(Robot):
         if time.time() < self._hold_until_ts:
             code, joints = self._arm.get_servo_angle()
             if code == 0:
-                self._arm.set_servo_angle_j(joints[:6])
+                # Hold with very slow velocity during warmup
+                self._arm.set_servo_angle_j(joints[:6], velo=0.1, acc=0.2)
                 for i in range(1, 7):
                     action[f"joint{i}.pos"] = joints[i-1]
-            # gripper optional: ignorieren oder ebenfalls halten
             return action
         
         if "delta_x" in action and "delta_y" in action and "delta_z" in action:
@@ -204,7 +204,11 @@ class Xarm(Robot):
 
         if has_joints:
             joint_positions = [action[k] for k in joint_keys]
-            self._arm.set_servo_angle_j(joint_positions)
+            # Use very reduced velocity and acceleration to avoid motor blocking
+            # velo in rad/s, acc in rad/s^2
+            velo = 0.15  # Very slow
+            acc = 0.3    # Very low acceleration
+            self._arm.set_servo_angle_j(joint_positions, velo=velo, acc=acc)
         else:
             # Nur lesen/fallback
             for i in range(1, 7):

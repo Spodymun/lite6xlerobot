@@ -1,0 +1,278 @@
+📘 README — Vision-to-Robot Calibration & Beer Pong Throwing (xArm + LeRobot)
+Überblick
+
+Dieses Projekt verbindet Vision (Kamera), Tisch-Koordinaten und einen xArm-Roboter, um Becher auf einem Tisch zu erkennen und gezielt anzufahren bzw. zu treffen (z. B. Beer-Pong-Wurf).
+
+Der Fokus liegt auf:
+
+stabiler Koordinatenkalibrierung
+
+reproduzierbarer Bewegung
+
+datengetriebenem Lernen mit LeRobot
+
+1) Software-Stack (was wofür)
+xArm Python SDK (UFactory)
+
+Direktzugriff auf den Roboter
+
+Lesen der TCP-Position (get_position)
+
+Bewegungsbefehle (Move)
+
+IO-Zugriff für Gripper/Release-Timing
+
+LeRobot SDK
+
+Datensatzformat
+
+Recording / Replay
+
+Policy-Training
+
+lerobot-robot-xarm
+
+Plugin, das xArm als Robot-Backend für LeRobot nutzbar macht
+
+2) Bewegungssteuerung & bekannte Probleme
+Mode & C20-Fehler
+
+mode(1) → zu aggressiv, praktisch immer maximale Geschwindigkeit
+→ führt zu C20-Fehlern bei schnellen Bewegungen
+
+mode(0) → Geschwindigkeit & Beschleunigung kontrollierbar
+→ wird verwendet
+
+Ergebnis
+
+Geschwindigkeit/Acceleration gezielt steuerbar
+
+Stabilere Würfe
+
+Weniger Schutzabschaltungen
+
+3) Gripper & Arm gleichzeitig
+Problem
+
+Armbewegung und Gripperaktion blockieren sich gegenseitig
+
+Lösung
+
+Gripper über UFactory IO ansteuern (nicht als Bewegungsbefehl)
+
+Armbewegung läuft weiter
+
+Release/Pre-Open exakt timbar
+
+4) Datensatz-Aufnahme (keine Teleoperation)
+
+Teleop (Tastatur/Joystick) ungeeignet für schnelle Wurfbewegungen
+
+Stattdessen:
+
+Scripted Demonstrations
+
+gezielte Wurf-Skripte
+
+Recording der Versuche mit LeRobot
+
+→ Lernen aus realen Ausführungen statt menschlicher Teleop
+
+5) Vision bewusst einfach gehalten
+Setup
+
+Weißer Tisch
+
+Rote Becher mit schwarzem Rand
+
+Schwarzer Ball (eingefärbt)
+
+Motivation
+
+robuste Farb- & Kantenerkennung
+
+OpenCV zuerst
+
+YOLO / Netze optional später
+
+6) Tisch-Koordinatensystem (Homographie)
+homography_calibrate
+
+4 ArUco-Marker definieren die Tisch-Ebene
+
+Tisch-Koordinatensystem:
+
+Ursprung: Mittelpunkt des unten-links Markers
+
+X: nach rechts
+
+Y: nach oben
+
+Einheit: mm
+
+Aus Pixel-Koordinaten → Tisch-Koordinaten wird eine Homographie H berechnet
+
+Optional: 3–4 Marker im Inneren zur Stabilisierung (Verzerrung, Jitter)
+
+Output
+
+homography.yaml
+
+Homographie-Matrix H
+
+Marker-IDs
+
+Tisch-Layout
+
+Einheit
+
+Ziel
+
+Pixel → Tisch-(x,y) stabil und reproduzierbar
+
+⚠️ Hinweis:
+Wenn Kamera oder Marker bewegt werden → Homographie neu berechnen.
+
+7) Bechererkennung (Vision → Tisch)
+cup_detect_live
+
+Becher in Pixeln erkennen (HSV-Rotmaske, Konturen)
+
+Pixel → Tisch via Homographie H
+
+Output:
+
+Becherposition (x,y) in mm
+
+optional visuelle Overlays
+
+Ziel
+
+Becherposition als Zahl, nicht als Bild
+
+8) Tisch → Roboter Kalibrierung (Punkt-zu-Punkt)
+table_to_robot_calibrate (Variante 5A)
+
+Es wird keine Hand-Eye-Kalibrierung über Kamera/Arm-Marker verwendet.
+
+Stattdessen:
+
+Auswahl mehrerer Tischpunkte im Koordinatensystem
+(Markerzentren + Punkte im Inneren)
+
+Roboter-TCP wird physisch von oben über diese Punkte gefahren
+
+Ausrichtung erfolgt nach Augenmaß von oben, nicht nach Kameraperspektive
+
+TCP-Position (X,Y,Z) wird über das xArm SDK gelesen (get_position)
+
+Es wird eine affine 2D-Abbildung gefittet:
+
+Robot_XY = A · Table_XY + b
+
+Z-Höhe während der Kalibrierung
+
+Während der Kalibrierung wird eine konstante Z-Höhe verwendet
+
+Diese dient nur der Messqualität, nicht der Modellbildung
+
+Besonderheit dieses Setups
+
+Der Roboter steht direkt auf dem Tisch.
+
+→ Die Tischoberfläche entspricht dem Roboter-Base-Z-Nullniveau:
+
+z_table = 0
+
+
+Daher:
+
+keine zusätzliche Z-Offset-Berechnung notwendig
+
+konstantes Z während der Kalibrierung ist direkt relativ zu z = 0
+
+Output
+
+table_to_robot.yaml
+
+Matrix A
+
+Offset b
+
+RMSE
+
+verwendete Punktpaare
+
+9) Validierung der Kalibrierung
+
+Nach Erzeugung von table_to_robot.yaml:
+
+Wähle 3 Testpunkte (nicht im Fit enthalten)
+
+Rechne:
+
+table → robot
+
+
+Fahre den Roboter an die berechneten Positionen
+
+Prüfe den Fehler (mm–cm)
+
+Richtwerte
+
+RMSE < 5 mm → sehr gut
+
+5–10 mm → ausreichend für Werfen
+
+10 mm → Punktwahl / Anfahren verbessern
+
+10) End-to-End Pipeline (Training)
+
+Wenn beide Kalibrierungen stehen:
+
+Kamera → Pixel-Becher
+
+Pixel → Tisch (Homographie)
+
+Tisch → Roboter (A,b)
+
+Roboter fährt / wirft (Script)
+
+LeRobot recordet:
+
+Bild
+
+Roboter-State
+
+Labels (z. B. Becher-(x,y))
+
+→ Training von Policies (z. B. Becher treffen)
+
+Wichtige Hinweise
+Tool/TCP-Definition
+
+Kalibrierung gilt nur für identische Tool-Definition
+
+Änderung von Greifer / Tool-Offset → Tisch→Roboter neu kalibrieren
+
+Re-Kalibrierung nötig bei
+
+Kamera verschoben
+
+ArUco-Marker verschoben
+
+Roboterbasis relativ zum Tisch verschoben
+
+Tool-Offset geändert
+
+Kernaussagen (Kurzfassung)
+
+ArUco-Viereck definiert Koordinaten, keinen Arbeitsraum
+
+Arm muss nicht im Bild sein
+
+TCP ist der einzige relevante Punkt
+
+Z konstant nur für Kalibrierung
+
+In diesem Setup gilt: z_table = 0

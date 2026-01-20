@@ -1,11 +1,13 @@
+RUN_NAME="run_$(date +%Y-%m-%d_%H-%M)-teleop-cam"
+
 python -m lerobot.scripts.lerobot_record \
   --config_path ~/src/lite6xlerobot/configs/xarm_with_vitade.yaml \
   --robot.ip 10.77.77.200 \
   --teleop.type keyboard_joint \
   --teleop.arm_action_keys '["joint1.pos","joint2.pos","joint3.pos","joint4.pos","joint5.pos","joint6.pos"]' \
-  --dataset.root ~/src/lite6xlerobot/records \
-  --dataset.repo_id local/run_001 \
-  --dataset.single_task "xArm camera teleop" \
+  --dataset.root ~/src/lite6xlerobot/records/$RUN_NAME \
+  --dataset.repo_id local/$RUN_NAME \
+  --dataset.single_task "teleop with calibrated home + camera" \
   --dataset.push_to_hub false \
   --dataset.num_episodes 1 \
   --dataset.episode_time_s 30 \
