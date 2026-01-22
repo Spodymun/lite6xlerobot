@@ -1,0 +1,1 @@
+python3 cups_yolo_clean.py --yolo_model yolov8n.pt --device cpu --show_red --show_edges

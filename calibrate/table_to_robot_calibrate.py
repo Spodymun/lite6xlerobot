@@ -1,163 +1,173 @@
 #!/usr/bin/env python3
-import sys
-import time
-import yaml
-import numpy as np
-from dataclasses import dataclass
-from typing import List, Tuple, Optional
+"""
+table_to_robot_calibrate.py
 
-# xArm SDK
+Calibrates an affine mapping from table coordinates (mm) to robot base XY (mm):
+    [Xr, Yr]^T = A * [Xt, Yt]^T + b
+
+Workflow:
+1) Define a list of table points in mm (Xt, Yt) you can physically reach/align with TCP.
+2) For each point:
+   - Move robot TCP above that point (by eye, from top view) at constant Z
+   - Press ENTER
+   - Script reads current TCP pose via xArm get_position()
+3) Fit affine transform, report RMS error, save to YAML.
+
+Run:
+  python3 table_to_robot_calibrate.py --ip 10.77.77.200 --out table_to_robot.yaml
+
+Note:
+- This does NOT need the arm marker in view.
+- Table points can be marker centers (you already have their mm positions).
+"""
+
+import argparse
+import time
+from dataclasses import dataclass
+from typing import List, Tuple
+
+import numpy as np
+import yaml
+
+# --- xArm SDK ---
 from xarm.wrapper import XArmAPI
 
-ROBOT_IP = "10.77.77.200"   # <-- anpassen falls nötig
-SET_MODE = True            # True = Skript setzt mode/state, False = nur lesen
-MODE = 0                   # 0 = position control (passt bei dir)
-STATE = 0                  # 0 = ready
+
+# ----------------------------
+# Put your table points here
+# (use points you can align TCP above)
+# ----------------------------
+TABLE_POINTS_MM: List[Tuple[float, float]] = [
+    # Ecken + innen (Beispiele: nutze deine Marker oder gut erreichbare Punkte)
+    (0.0, 0.0),        # ID10
+    (720.0, 0.0),      # ID11
+    (0.0, 1100.0),     # ID13
+    (720.0, 1100.0),   # ID15
+    (360.0, 250.0),    # ID16
+    (360.0, 800.0),    # ID17
+    (0.0, 500.0),      # ID12
+    (720.0, 500.0),    # ID14
+]
+
 
 @dataclass
-class Pair:
-    table_xy_mm: Tuple[float, float]
-    robot_xyz_mm: Tuple[float, float, float]
+class Sample:
+    table_xy: Tuple[float, float]
+    robot_xy: Tuple[float, float]
+    robot_pose6: Tuple[float, float, float, float, float, float]
 
-def fit_affine_2d(pairs: List[Pair]) -> Tuple[np.ndarray, np.ndarray, float]:
+
+def fit_affine_2d(table_xy: np.ndarray, robot_xy: np.ndarray):
     """
-    Fit Robot_XY = A * Table_XY + b using least squares.
-    Returns A (2x2), b (2,), rmse_mm
+    Solve for affine mapping:
+      Xr = a11*Xt + a12*Yt + b1
+      Yr = a21*Xt + a22*Yt + b2
     """
-    if len(pairs) < 3:
-        raise ValueError("Mindestens 3 Punktpaare nötig (besser 6-12).")
+    assert table_xy.shape[1] == 2
+    assert robot_xy.shape[1] == 2
+    n = table_xy.shape[0]
+    if n < 3:
+        raise ValueError("Need at least 3 points for affine fit (better 6-10).")
 
-    M = []
-    t = []
-    for p in pairs:
-        x, y = p.table_xy_mm
-        X, Y, _Z = p.robot_xyz_mm
-        M.append([x, y, 1.0, 0.0, 0.0, 0.0])
-        M.append([0.0, 0.0, 0.0, x, y, 1.0])
-        t.append(X)
-        t.append(Y)
+    # Build design matrix: [Xt Yt 1]
+    M = np.hstack([table_xy, np.ones((n, 1), dtype=np.float64)])  # (n,3)
 
-    M = np.array(M, dtype=np.float64)
-    t = np.array(t, dtype=np.float64)
+    # Solve least squares for X and Y separately
+    # params_x = [a11 a12 b1]
+    # params_y = [a21 a22 b2]
+    params_x, *_ = np.linalg.lstsq(M, robot_xy[:, 0], rcond=None)
+    params_y, *_ = np.linalg.lstsq(M, robot_xy[:, 1], rcond=None)
 
-    params, *_ = np.linalg.lstsq(M, t, rcond=None)
-    a11, a12, b1, a21, a22, b2 = params
+    A = np.array([[params_x[0], params_x[1]],
+                  [params_y[0], params_y[1]]], dtype=np.float64)
+    b = np.array([params_x[2], params_y[2]], dtype=np.float64)
 
-    A = np.array([[a11, a12],
-                  [a21, a22]], dtype=np.float64)
-    b = np.array([b1, b2], dtype=np.float64)
+    # Predict + errors
+    pred = (M @ np.vstack([params_x, params_y]).T)  # (n,2)
+    err = pred - robot_xy
+    rmse = float(np.sqrt(np.mean(np.sum(err**2, axis=1))))
+    per_point = np.sqrt(np.sum(err**2, axis=1)).astype(float)
 
-    errs = []
-    for p in pairs:
-        x, y = p.table_xy_mm
-        pred = A @ np.array([x, y]) + b
-        X, Y, _Z = p.robot_xyz_mm
-        errs.append(np.linalg.norm(pred - np.array([X, Y])))
+    return A, b, rmse, per_point, pred
 
-    rmse = float(np.sqrt(np.mean(np.square(errs))))
-    return A, b, rmse
-
-def parse_xy(prompt: str) -> Optional[Tuple[float, float]]:
-    s = input(prompt).strip()
-    if s == "":
-        return None
-    s = s.replace(";", ",").replace(" ", "")
-    parts = s.split(",")
-    if len(parts) != 2:
-        print("Bitte als x,y eingeben (z.B. 150,200).")
-        return parse_xy(prompt)
-    try:
-        return float(parts[0]), float(parts[1])
-    except ValueError:
-        print("Konnte Zahlen nicht lesen.")
-        return parse_xy(prompt)
 
 def main():
-    print("\n=== Tisch -> Roboter Kalibrierung (LIVE TCP via xArm SDK) ===")
-    print("Einheit: mm")
-    print(f"Robot IP: {ROBOT_IP}\n")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ip", type=str, required=True, help="Robot IP (xArm), e.g. 10.77.77.200")
+    ap.add_argument("--out", type=str, default="table_to_robot.yaml")
+    ap.add_argument("--speed", type=float, default=50.0, help="(optional) for future auto moves, not used here")
+    ap.add_argument("--acc", type=float, default=200.0, help="(optional) for future auto moves, not used here")
+    args = ap.parse_args()
 
-    arm = XArmAPI(ROBOT_IP)
+    arm = XArmAPI(args.ip)
     arm.connect()
+    arm.motion_enable(True)
+    arm.set_mode(0)  # position control with adjustable speed/acc
+    arm.set_state(0)
+    time.sleep(0.5)
 
-    if SET_MODE:
-        arm.motion_enable(True)
-        arm.set_mode(MODE)
-        arm.set_state(STATE)
-        time.sleep(0.2)
+    print("\n=== table_to_robot_calibrate ===")
+    print("TCP pose is read via xArm get_position() in mm/deg.")
+    print("For each table point, align TCP ABOVE the point (top-down) at constant Z, then press ENTER.\n")
 
-    print("Hinweise:")
-    print("  - Fahre den TCP (Tool Center Point) nacheinander über mehrere Tischpunkte.")
-    print("  - Halte Z möglichst konstant (z.B. 30-50mm über Tisch).")
-    print("  - Punkte gut verteilen (Ecken + innen).")
-    print("  - Eingabeformat Tischpunkt: x,y (mm). Enter = fertig.\n")
+    samples: List[Sample] = []
 
-    pairs: List[Pair] = []
+    for i, (xt, yt) in enumerate(TABLE_POINTS_MM):
+        input(f"[{i+1}/{len(TABLE_POINTS_MM)}] Move TCP above TABLE point (Xt,Yt)=({xt:.1f},{yt:.1f}) mm and press ENTER...")
 
-    while True:
-        table_xy = parse_xy(f"[{len(pairs)+1}] Tischpunkt x,y in mm (Enter = fertig): ")
-        if table_xy is None:
-            break
-
-        input("    Roboter jetzt über diesen Punkt fahren. Dann Enter drücken zum Auslesen...")
-
-        code, pos = arm.get_position()
-        if code != 0 or pos is None:
-            print(f"    FEHLER: get_position() ret={code}, pos={pos}")
+        code, pose = arm.get_position(is_radian=False)
+        if code != 0 or pose is None:
+            print("ERROR: get_position failed, code=", code, "pose=", pose)
             continue
 
-        X, Y, Z, Rx, Ry, Rz = pos
-        print(f"    TCP gelesen: X={X:.3f}  Y={Y:.3f}  Z={Z:.3f} (mm)")
-        pairs.append(Pair(table_xy_mm=table_xy, robot_xyz_mm=(float(X), float(Y), float(Z))))
-        print("    OK gespeichert.\n")
+        # pose: [x, y, z, roll, pitch, yaw] in mm/deg
+        xr, yr, zr, rx, ry, rz = pose
+        print(f"  Read TCP: X={xr:.3f} Y={yr:.3f} Z={zr:.3f} Rx={rx:.3f} Ry={ry:.3f} Rz={rz:.3f}")
 
-    if len(pairs) < 3:
-        print("Zu wenige Punkte. Mindestens 3, besser 6-12.")
-        arm.disconnect()
-        sys.exit(1)
+        samples.append(Sample(
+            table_xy=(float(xt), float(yt)),
+            robot_xy=(float(xr), float(yr)),
+            robot_pose6=(float(xr), float(yr), float(zr), float(rx), float(ry), float(rz)),
+        ))
 
-    A, b, rmse = fit_affine_2d(pairs)
+    if len(samples) < 3:
+        raise SystemExit("Not enough samples collected (<3).")
 
-    print("\n=== Ergebnis (Robot_XY = A * Table_XY + b) ===")
-    print(f"A = [[{A[0,0]: .6f}, {A[0,1]: .6f}],")
-    print(f"     [{A[1,0]: .6f}, {A[1,1]: .6f}]]")
-    print(f"b = [{b[0]: .3f}, {b[1]: .3f}]  mm")
-    print(f"RMSE: {rmse:.2f} mm  (Richtwert: <5mm sehr gut, 5-10mm ok)\n")
+    table_xy = np.array([s.table_xy for s in samples], dtype=np.float64)
+    robot_xy = np.array([s.robot_xy for s in samples], dtype=np.float64)
 
-    # Option: Z prüfen
-    zs = [p.robot_xyz_mm[2] for p in pairs]
-    print(f"Z-Range: min={min(zs):.2f} mm  max={max(zs):.2f} mm  (kleiner Bereich = besser)\n")
+    A, b, rmse, per_point, pred = fit_affine_2d(table_xy, robot_xy)
 
+    print("\n=== FIT RESULT ===")
+    print("A =\n", A)
+    print("b =", b)
+    print(f"RMSE (mm): {rmse:.3f}")
+    print("Per-point error (mm):", [float(x) for x in per_point])
+
+    # Save YAML
     out = {
-        "unit": "mm",
-        "model": "affine_2d_table_to_robot_xy",
-        "robot_ip": ROBOT_IP,
+        "model": "affine_2d",
+        "units": {"table": "mm", "robot": "mm"},
         "A": A.tolist(),
         "b": b.tolist(),
         "rmse_mm": rmse,
-        "z_mm_mean": float(np.mean(zs)),
-        "z_mm_min": float(min(zs)),
-        "z_mm_max": float(max(zs)),
-        "pairs_used": [
+        "samples": [
             {
-                "table_xy_mm": [p.table_xy_mm[0], p.table_xy_mm[1]],
-                "robot_xyz_mm": [p.robot_xyz_mm[0], p.robot_xyz_mm[1], p.robot_xyz_mm[2]],
+                "table_mm": [s.table_xy[0], s.table_xy[1]],
+                "robot_mm": [s.robot_xy[0], s.robot_xy[1]],
+                "robot_pose6": list(s.robot_pose6),
             }
-            for p in pairs
+            for s in samples
         ],
-        "notes": {
-            "how_to_use": "robot_xy = A @ table_xy + b",
-            "tip": "Mehr Punkte + bessere Verteilung = stabiler. Z konstant halten.",
-        }
     }
 
-    out_path = "table_to_robot.yaml"
-    with open(out_path, "w") as f:
+    with open(args.out, "w") as f:
         yaml.safe_dump(out, f, sort_keys=False)
 
-    print(f"Gespeichert: {out_path}")
+    print(f"\nSaved: {args.out}")
 
     arm.disconnect()
+
 
 if __name__ == "__main__":
     main()
