@@ -300,7 +300,7 @@ def mm_dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
 def main():
     ap = argparse.ArgumentParser()
 
-    ap.add_argument("--cam", type=int, default=2)
+    ap.add_argument("--cam", type=int, default=0)
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=480)
     ap.add_argument("--H", type=str, default="H.npy")

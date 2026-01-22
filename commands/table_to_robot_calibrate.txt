@@ -1,0 +1,1 @@
+python3 table_to_robot_calibrate.py --ip 10.77.77.200 --out table_to_robot.yaml

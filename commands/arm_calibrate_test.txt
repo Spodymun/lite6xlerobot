@@ -1,0 +1,1 @@
+python3 arm_calibrate_test.py --ip 10.77.77.200 --calib table_to_robot.yaml --xt 590 --yt 1000 --z 199.3
