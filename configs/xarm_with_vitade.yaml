@@ -1,10 +1,2 @@
 robot:
   type: lerobot_robot_xarm
-  cameras:
-    front:
-      type: opencv
-      index_or_path: /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._USB_Live_camera_SN0001-video-index0
-      width: 640
-      height: 480
-      fps: 30
-      fourcc: MJPG 
