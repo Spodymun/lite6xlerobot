@@ -1,0 +1,1 @@
+python3 run_autonomous.py  --ip 10.77.77.200 --cam 0 --H H.npy  --wurf 1 --max-throws 1  --pick-y-offset-mm -30  --hover-z-mm 100  --wurf-mode progress  --release-at 0.55  --progress-timeout 2.0  --poll-dt 0.005
