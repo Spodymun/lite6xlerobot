@@ -1,1 +1,19 @@
-python3 cups_yolo.py --device cpu --show_red --yolo_conf 0.10 --roi_pad 0.05 --ann_in 1 --ann_out 6 --red_ring_min 0.06 --black_min 0.10 --black_dark_thresh 125 --inner_r_frac 0.42 --white_inner_min 0.22 --white_v_min 135 --red_inner_max 0.16 --h_param2 8 --h_minDist 12
+python3 cups_yolo.py \
+  --cam 0 \
+  --H H.npy \
+  --device cpu \
+  --once \
+  --show_red \
+  --yolo_conf 0.10 \
+  --roi_pad 0.05 \
+  --ann_in 1 \
+  --ann_out 6 \
+  --red_ring_min 0.06 \
+  --black_min 0.10 \
+  --black_dark_thresh 125 \
+  --inner_r_frac 0.42 \
+  --white_inner_min 0.22 \
+  --white_v_min 135 \
+  --red_inner_max 0.16 \
+  --h_param2 8 \
+  --h_minDist 12

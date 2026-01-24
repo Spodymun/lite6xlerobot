@@ -1,1 +1,8 @@
-python3 cups_yolo_clean.py --yolo_model yolov8n.pt --device cpu --show_red --show_edges
+python3 cups_yolo.py \
+  --cam 0 \
+  --H H.npy \
+  --yolo_model yolov8n.pt \
+  --device cpu \
+  --once \
+  --show_red \
+  --show_edges

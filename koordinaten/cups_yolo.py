@@ -1,32 +1,19 @@
 #!/usr/bin/env python3
 """
-Beer-Pong Cup Detection (YOLO + Aimpoint checks) - CLEAN VERSION
+Beer-Pong Cup Detection (YOLO + Aimpoint checks) - CLEAN + NEAREST-TO-ARM BIAS
 
-- YOLO detects cup bounding boxes.
-- In each box, find precise aim point:
-  - Prefer Hough circle in ROI
-  - Fallback: centroid of white interior blob
-- Verify aimpoint:
-  - white interior ratio in inner disk >= white_inner_min
-  - red ratio in inner disk <= red_inner_max
-  - red ratio in outer annulus >= red_ring_min
-  - black rim fraction >= black_min
-- Convert px -> mm via homography H.npy, apply y_offset
-- Hard gate: 0<=x<=800 and 0<=y<=1800 (configurable)
-- Diameter gate: <= 100mm
-- Simple safety:
-  - pick best candidate by score
-  - READY only if best score >= ready_score AND stable for ready_frames
+Neu:
+- Becher-Auswahl bevorzugt Ziele, die näher am Arm liegen (ARM_MM), ohne den visuellen Score zu ignorieren.
+- Auswahlkriterium: score - DIST_W * distance_to_arm_mm
 
-Install:
-  pip install ultralytics
+Machine-readable output (only when READY):
+  CUP_MM x_mm y_mm score yolo_conf
 
-Run:
-  python3 cups_yolo_clean.py --yolo_model yolov8n.pt --device cpu --show_red --show_edges
+Beispiel:
+  python3 cups_yolo.py --cam 2 --H H.npy --device cpu --once
 """
 
 import argparse
-import time
 import cv2
 import numpy as np
 from dataclasses import dataclass
@@ -38,6 +25,9 @@ except Exception:
     YOLO = None
 
 
+# ==============================
+# Data structure
+# ==============================
 @dataclass
 class Det:
     rim_px: Tuple[float, float]
@@ -262,7 +252,6 @@ def pick_best_circle_in_roi(
         if r_inner > red_inner_max:
             continue
 
-        # Score: prioritize "point inside white", then rim, then red outside
         score = (2.2 * w_inner) + (2.0 * bfrac) + (1.8 * rratio) + (0.01 * r)
         if score > best_score:
             best_score = score
@@ -272,7 +261,7 @@ def pick_best_circle_in_roi(
 
 
 # ==============================
-# YOLO
+# YOLO helper
 # ==============================
 def yolo_boxes(model, frame_bgr: np.ndarray, *, conf: float, iou: float, cls: Optional[int], device: str):
     res = model.predict(frame_bgr, conf=conf, iou=iou, verbose=False, device=device)[0]
@@ -291,7 +280,7 @@ def yolo_boxes(model, frame_bgr: np.ndarray, *, conf: float, iou: float, cls: Op
 
 
 # ==============================
-# Simple safety (stability)
+# Stability helper
 # ==============================
 def mm_dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     return float(np.hypot(a[0] - b[0], a[1] - b[1]))
@@ -303,7 +292,14 @@ def main():
     ap.add_argument("--cam", type=int, default=0)
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=480)
-    ap.add_argument("--H", type=str, default="H.npy")
+
+    ap.add_argument("--H", type=str, default="H.npy", help="Fixed homography pixel->table(mm)")
+    ap.add_argument("--once", action="store_true", help="Exit after first READY CUP_MM output")
+
+    # Arm-bias: du kannst das grob setzen, muss nicht mm-genau sein
+    ap.add_argument("--arm_x", type=float, default=360.0, help="Arm reference X in table mm")
+    ap.add_argument("--arm_y", type=float, default=1300.0, help="Arm reference Y in table mm")
+    ap.add_argument("--dist_w", type=float, default=0.002, help="Distance penalty weight (score per mm)")
 
     # YOLO
     ap.add_argument("--yolo_model", type=str, default="yolov8n.pt")
@@ -313,7 +309,7 @@ def main():
     ap.add_argument("--roi_pad", type=float, default=0.12)
     ap.add_argument("--device", type=str, default="cpu")
 
-    # mm / throw
+    # mm ROI
     ap.add_argument("--y_offset", type=float, default=50.0)
     ap.add_argument("--xmin", type=float, default=0.0)
     ap.add_argument("--xmax", type=float, default=800.0)
@@ -343,10 +339,10 @@ def main():
     ap.add_argument("--white_v_min", type=int, default=150)
     ap.add_argument("--white_s_max", type=int, default=95)
 
-    # READY logic (simple & robust)
-    ap.add_argument("--ready_score", type=float, default=2.3, help="Min det.score to consider target reliable.")
-    ap.add_argument("--ready_frames", type=int, default=2, help="Frames the best target must stay stable.")
-    ap.add_argument("--stable_mm", type=float, default=120.0, help="Best target must stay within this mm distance.")
+    # READY logic
+    ap.add_argument("--ready_score", type=float, default=2.3)
+    ap.add_argument("--ready_frames", type=int, default=2)
+    ap.add_argument("--stable_mm", type=float, default=120.0)
 
     # debug
     ap.add_argument("--show_edges", action="store_true")
@@ -358,13 +354,19 @@ def main():
         raise RuntimeError("Ultralytics not installed. Run: pip install ultralytics")
 
     model = YOLO(args.yolo_model)
+
     H = np.load(args.H)
-    print("Loaded H:\n", H)
-    print("Press 'q' to quit")
+    if H.shape != (3, 3):
+        raise RuntimeError(f"H must be 3x3, got {H.shape}")
 
     cap = cv2.VideoCapture(args.cam, cv2.CAP_V4L2)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+    if not cap.isOpened():
+        raise RuntimeError(f"Camera not opened: --cam {args.cam}")
+
+    ARM_MM = (float(args.arm_x), float(args.arm_y))
+    DIST_W = float(args.dist_w)
 
     last_best_mm: Optional[Tuple[float, float]] = None
     best_streak = 0
@@ -382,7 +384,6 @@ def main():
         redmask = red_mask_hsv(hsv)
 
         boxes = yolo_boxes(model, frame, conf=args.yolo_conf, iou=args.yolo_iou, cls=args.yolo_cls, device=args.device)
-
         dets: List[Det] = []
 
         for (x0, y0, x1, y1, bconf, cls_id) in boxes:
@@ -395,7 +396,6 @@ def main():
             roi_hsv = hsv[ry0:ry1, rx0:rx1]
             roi_gray = gray[ry0:ry1, rx0:rx1]
 
-            # radius guess based on ROI size
             est_r = int(0.25 * min(rx1 - rx0, ry1 - ry0))
             min_r = max(args.h_min_r, int(est_r * 0.6))
             max_r = min(args.h_max_r, int(est_r * 1.5))
@@ -428,10 +428,10 @@ def main():
                 cy_full = ry0 + cy
                 r_full = r
             else:
-                # Fallback: white centroid
                 wc = find_white_centroid_roi(roi_hsv, v_min=args.white_v_min, s_max=args.white_s_max)
                 if wc is None:
                     continue
+
                 cx_full = rx0 + wc[0]
                 cy_full = ry0 + wc[1]
                 r_full = float(max(12, est_r))
@@ -457,18 +457,22 @@ def main():
                 if rratio < args.red_ring_min:
                     continue
 
-            # px -> mm + offset + HARD ROI
             x_mm, y_mm = pix_to_table(H, float(cx_full), float(cy_full))
             y_mm += args.y_offset
             if not in_mm_roi(x_mm, y_mm, args.xmin, args.xmax, args.ymin, args.ymax):
                 continue
 
-            # diameter gate
             diam_mm = estimate_diameter_mm_from_homography(H, float(cx_full), float(cy_full), float(r_full))
             if diam_mm > args.max_diam_mm:
                 continue
 
-            score = (2.2 * float(w_inner)) + (2.0 * float(bfrac)) + (1.8 * float(rratio)) + (0.01 * float(r_full)) - (0.002 * float(diam_mm))
+            score = (
+                (2.2 * float(w_inner)) +
+                (2.0 * float(bfrac)) +
+                (1.8 * float(rratio)) +
+                (0.01 * float(r_full)) -
+                (0.002 * float(diam_mm))
+            )
 
             dets.append(Det(
                 rim_px=(float(cx_full), float(cy_full)),
@@ -484,10 +488,17 @@ def main():
                 box_xyxy=(x0, y0, x1, y1),
             ))
 
-        # pick best candidate
-        best_det: Optional[Det] = max(dets, key=lambda d: d.score, default=None)
+        # ---------------------------------------------------------
+        # Pick best candidate with NEAREST-TO-ARM bias:
+        # best = max(score - DIST_W * distance_to_arm)
+        # ---------------------------------------------------------
+        def selection_value(d: Det) -> float:
+            dist = float(np.hypot(d.x_mm - ARM_MM[0], d.y_mm - ARM_MM[1]))
+            return float(d.score) - DIST_W * dist
 
-        # stability streak
+        best_det: Optional[Det] = max(dets, key=selection_value, default=None)
+
+        # stability streak -> READY
         ready = False
         if best_det is None or best_det.score < args.ready_score:
             best_streak = 0
@@ -501,16 +512,22 @@ def main():
             last_best_mm = cur_mm
             ready = best_streak >= args.ready_frames
 
+        # ------------------ MACHINE OUTPUT ------------------
+        if best_det is not None and ready:
+            print(f"CUP_MM {best_det.x_mm:.1f} {best_det.y_mm:.1f} {best_det.score:.3f} {best_det.yolo_conf:.3f}")
+            if args.once:
+                break
+
         # ------------------ VIS ------------------
         vis = frame.copy()
 
-        # draw YOLO boxes (optional but useful)
+        # draw YOLO boxes
         for (x0, y0, x1, y1, bconf, cls_id) in boxes:
             cv2.rectangle(vis, (x0, y0), (x1, y1), (255, 180, 0), 2)
             cv2.putText(vis, f"yolo {bconf:.2f}", (x0, max(0, y0 - 6)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 180, 0), 2)
 
-        # draw detections
+        # draw dets
         for d in dets:
             cx, cy = d.rim_px
             r = int(round(d.r_px))
@@ -523,37 +540,41 @@ def main():
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 2
             )
 
-        # status + best target
         cv2.putText(
             vis,
-            f"ROI x[0..800] y[0..1800]  maxDiam={args.max_diam_mm:.0f}mm",
+            f"ARM=({ARM_MM[0]:.0f},{ARM_MM[1]:.0f})  dist_w={DIST_W:.4f}",
             (10, 20),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2
+        )
+        cv2.putText(
+            vis,
+            f"ROI x[{args.xmin:.0f}..{args.xmax:.0f}] y[{args.ymin:.0f}..{args.ymax:.0f}]  maxDiam={args.max_diam_mm:.0f}mm",
+            (10, 42),
             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2
         )
 
         if best_det is not None:
             cx, cy = best_det.rim_px
             cv2.circle(vis, (int(cx), int(cy)), 14, (0, 0, 255), 3)
-
             if ready:
                 cv2.putText(
                     vis,
-                    f"READY  streak={best_streak}  THROW ({best_det.x_mm:.1f},{best_det.y_mm:.1f})",
-                    (10, 45),
+                    f"READY streak={best_streak}  THROW ({best_det.x_mm:.1f},{best_det.y_mm:.1f})",
+                    (10, 65),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2
                 )
             else:
                 cv2.putText(
                     vis,
-                    f"NOT READY  streak={best_streak}/{args.ready_frames}  bestScore={best_det.score:.2f}/{args.ready_score:.2f}",
-                    (10, 45),
+                    f"NOT READY streak={best_streak}/{args.ready_frames}  bestScore={best_det.score:.2f}/{args.ready_score:.2f}",
+                    (10, 65),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2
                 )
         else:
             cv2.putText(
                 vis,
                 "NO DETECTIONS",
-                (10, 45),
+                (10, 65),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2
             )
 
