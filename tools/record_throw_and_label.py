@@ -1,36 +1,27 @@
 #!/usr/bin/env python3
-"""record_throw_and_label.py
+"""
+tools/record_throw_and_label.py
 
-Ablauf (Episode):
-1) Cup XY (Input fürs Modell) erfassen (CLI oder Prompt)
-2) Ball finden (YOLO via koordinaten/ball_finder.py -> BALL_MM x y conf)
-3) Ball aufnehmen (Top-Down Pick, IK, fixed RPY)
-4) Zur INIT-Pose fahren (fixe Joint-Werte)
-5) LeRobot Recording starten
-6) Wurfskript ausführen
-7) Recording endet (lerobot_record endet nach episode_time_s)
-8) Label: target_xy_mm (getroffen) abfragen
-9) Alles als JSONL loggen (Metadaten + Parameter + References)
-
-Hinweis:
-- Pick/Init sind NICHT Teil des LeRobot-Recordings (sauber für IL des Wurfs).
-- Cup XY ist die "Task-Condition" fürs Modell: (cup_x, cup_y).
-
-Änderungen (Jan 2026):
-- WURF_PRESETS entfernt (throw_speed/throw_acc waren konstant/unnötig)
-- release_at wird automatisch aus wurf_*.py gelesen (statisch per AST)
-- optional: gripper re-init (enable toggle) ohne bewusstes open/close
+Ablauf:
+1) Ball finden (koordinaten/ball_finder.py -> "BALL_MM x y conf")
+2) Ball aufnehmen (Top-Down Pick, IK, fixed RPY)
+3) INIT Pose anfahren (fest im Code)
+4) LeRobot Recording starten (UNVERÄNDERT!)
+5) 5 Sekunden warten
+6) wuerfe/throw_from_job.py mit --job ausführen + --result /tmp/throw_result.json
+7) Landing-Zone per 1-Taste labeln (q/w/e/a/s/d/y/x/c, s=hit)
+8) meta/throw_label.json schreiben (inkl. release_xyz_actual aus result)
+9) Terminal bleibt aktiv bis LeRobot fertig aufgenommen hat (rec_proc.wait())
 """
 
 import argparse
-import ast
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -38,138 +29,59 @@ import numpy as np
 import yaml
 from xarm.wrapper import XArmAPI
 
+import termios
+import tty
+
 
 # -----------------------------
-# INIT Pose + Pick RPY
+# FESTE IP + INIT Pose
 # -----------------------------
+ROBOT_IP = "10.77.77.200"
+
 INIT_JOINTS_RAD = [
-    -1.570796,  # J1  -90°
-     0.717557,  # J2   41.1°
-     1.192005,  # J3   68.3°
-     0.000000,  # J4    0°
-     0.474205,  # J5   27.2°
-    -1.570796,  # J6  -90°
+    -1.570796,
+     0.717557,
+     1.192005,
+     0.000000,
+     0.474205,
+    -1.570796,
 ]
 
-# Fixed TOP-DOWN orientation for picking (degrees)
 FIX_R, FIX_P, FIX_YAW = -180, 0, 0
 
 
 # ------------------------------------------------------------
-# Helpers
+# Landing zone keys (1-key labeling)
 # ------------------------------------------------------------
-def now_iso_local() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+ZONE_MAP = {
+    "q": "top_left",
+    "w": "top_center",
+    "e": "top_right",
+    "a": "mid_left",
+    "s": "hit",
+    "d": "mid_right",
+    "y": "bot_left",
+    "x": "bot_center",
+    "c": "bot_right",
+}
+VALID_ZONE_KEYS = set(ZONE_MAP.keys())
 
 
-def ask_float(prompt: str):
-    s = input(prompt).strip()
-    if not s or s.lower() in ("skip", "none", "-"):
-        return None
-    return float(s)
-
-
-def newest_parquet_in(dirpath: Path) -> Optional[Path]:
-    files = sorted(
-        dirpath.glob("**/*.parquet"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    return files[0] if files else None
-
-
-def find_latest_data_file(dataset_root: Path) -> Tuple[str, str]:
-    data_root = dataset_root / "data"
-    newest = newest_parquet_in(data_root)
-    if newest is None:
-        raise RuntimeError("No parquet file found under data/")
-    return newest.parent.name, newest.name
-
-
-def append_jsonl(path: Path, obj: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-
-
-def make_unique_dir(path: Path) -> Path:
-    if not path.exists():
-        return path
-    i = 2
-    while True:
-        p = Path(str(path) + f"_v{i}")
-        if not p.exists():
-            return p
-        i += 1
-
-
-def read_release_at_from_wurf(wurf_path: Path) -> Optional[float]:
-    """
-    Liest release_at aus wurf_*.py ohne das Skript auszuführen.
-
-    Unterstützt:
-    1) Top-level Variablen: RELEASE_AT, RELEASE_AT_PROGRESS, release_at
-    2) WurfConfig(..., release_at=<zahl>, ...) als Keyword in einem Call
-    """
+def read_single_key(valid_keys=VALID_ZONE_KEYS) -> str:
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
     try:
-        src = wurf_path.read_text(encoding="utf-8")
-    except Exception:
-        return None
+        tty.setraw(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if not ch:
+                continue
+            ch = ch.lower()
+            if ch in valid_keys:
+                return ch
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
-    try:
-        tree = ast.parse(src, filename=str(wurf_path))
-    except SyntaxError:
-        return None
-
-    # 1) Fall: Top-level assignment
-    wanted = {"RELEASE_AT", "RELEASE_AT_PROGRESS", "release_at"}
-    found = {}
-
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            name = node.targets[0].id
-            if name in wanted:
-                try:
-                    val = ast.literal_eval(node.value)
-                    if isinstance(val, (int, float)):
-                        found[name] = float(val)
-                except Exception:
-                    pass
-
-    for key in ["RELEASE_AT", "RELEASE_AT_PROGRESS", "release_at"]:
-        if key in found:
-            return found[key]
-
-    # 2) Fall: WurfConfig(..., release_at=0.40, ...)
-    class Finder(ast.NodeVisitor):
-        def __init__(self):
-            self.value = None
-
-        def visit_Call(self, node: ast.Call):
-            # check function name: WurfConfig(...)
-            fn_name = None
-            if isinstance(node.func, ast.Name):
-                fn_name = node.func.id
-            elif isinstance(node.func, ast.Attribute):
-                fn_name = node.func.attr  # e.g. something.WurfConfig
-
-            if fn_name == "WurfConfig":
-                for kw in node.keywords:
-                    if kw.arg == "release_at":
-                        try:
-                            v = ast.literal_eval(kw.value)
-                            if isinstance(v, (int, float)):
-                                self.value = float(v)
-                                return  # stop early
-                        except Exception:
-                            pass
-
-            # keep searching
-            self.generic_visit(node)
-
-    f = Finder()
-    f.visit(tree)
-    return f.value
 
 # ------------------------------------------------------------
 # Ball detection via subprocess (ball_finder.py)
@@ -234,7 +146,7 @@ def run_and_capture_first_ball(cmd, *, timeout_s: float, verbose: bool) -> Optio
 # ------------------------------------------------------------
 class TableToRobot:
     def __init__(self, yaml_path: str):
-        with open(yaml_path, "r") as f:
+        with open(yaml_path, "r", encoding="utf-8") as f:
             d = yaml.safe_load(f)
         self.A = np.array(d["A"], dtype=float)
         self.b = np.array(d["b"], dtype=float)
@@ -246,10 +158,10 @@ class TableToRobot:
 
 
 # ------------------------------------------------------------
-# Robot ops
+# Robot ops (pick stage only)
 # ------------------------------------------------------------
-def arm_connect(ip: str) -> XArmAPI:
-    arm = XArmAPI(ip, is_radian=True)
+def arm_connect() -> XArmAPI:
+    arm = XArmAPI(ROBOT_IP, is_radian=True)
     arm.connect()
     arm.clean_error()
     arm.clean_warn()
@@ -269,12 +181,12 @@ def go_init_pose(arm: XArmAPI, *, speed: float, acc: float, wait: bool = True) -
         wait=wait,
     )
     if code != 0:
-        print(f"[ERR] go_init_pose failed code={code}")
         arm.clean_error()
         arm.clean_warn()
         arm.set_state(0)
         return False
     return True
+
 
 def pick_ball_topdown(
     arm: XArmAPI,
@@ -289,23 +201,28 @@ def pick_ball_topdown(
     pick_y_offset_mm: float,
     pick_x_offset_mm: float,
 ) -> Tuple[bool, dict]:
-    """
-    Top-down pick: fixed RPY, only Z changes. Uses IK -> servo_angle.
-
-    Returns (ok, meta) where meta includes robot-space pick XY used.
-    """
-
     def ik_joints_for_pose_xyz_rpy_deg(x, y, z, r, p, yaw) -> Optional[list]:
         code, joints = arm.get_inverse_kinematics(
             [float(x), float(y), float(z), float(r), float(p), float(yaw)],
             input_is_radian=False,
             return_is_radian=True,
         )
-        if code != 0 or joints is None:
-            return None
-        return [float(v) for v in joints[:6]]
+        if code == 0 and joints is not None:
+            return [float(v) for v in joints[:6]]
 
-    # open gripper before pick (einmal, nicht mehrfach)
+        # Roll wrap fallback (-180 <-> +180)
+        if abs(float(r)) == 180.0:
+            r2 = 180.0 if float(r) < 0 else -180.0
+            code2, joints2 = arm.get_inverse_kinematics(
+                [float(x), float(y), float(z), float(r2), float(p), float(yaw)],
+                input_is_radian=False,
+                return_is_radian=True,
+            )
+            if code2 == 0 and joints2 is not None:
+                return [float(v) for v in joints2[:6]]
+
+        return None
+
     arm.open_lite6_gripper(sync=True)
     time.sleep(0.10)
 
@@ -313,11 +230,8 @@ def pick_ball_topdown(
     rx = rx + float(pick_x_offset_mm)
     ry = ry + float(pick_y_offset_mm)
 
-    meta = {
-        "robot_pick_xy_mm": [rx, ry],
-    }
+    meta = {"robot_pick_xy_mm": [rx, ry]}
 
-    # 1) hover
     j_hover = ik_joints_for_pose_xyz_rpy_deg(rx, ry, hover_z_mm, FIX_R, FIX_P, FIX_YAW)
     if j_hover is None:
         print("[ERR] IK hover failed")
@@ -327,7 +241,6 @@ def pick_ball_topdown(
         print(f"[ERR] move hover failed code={code}")
         return False, meta
 
-    # 2) down
     j_pick = ik_joints_for_pose_xyz_rpy_deg(rx, ry, pick_z_mm, FIX_R, FIX_P, FIX_YAW)
     if j_pick is None:
         print("[ERR] IK pick failed")
@@ -337,11 +250,9 @@ def pick_ball_topdown(
         print(f"[ERR] move down failed code={code}")
         return False, meta
 
-    # 3) close
     arm.close_lite6_gripper(sync=True)
     time.sleep(0.10)
 
-    # 4) lift
     j_lift = ik_joints_for_pose_xyz_rpy_deg(rx, ry, lift_z_mm, FIX_R, FIX_P, FIX_YAW)
     if j_lift is None:
         print("[ERR] IK lift failed")
@@ -355,21 +266,90 @@ def pick_ball_topdown(
 
 
 # ------------------------------------------------------------
-# Main
+# Job/Label helper
 # ------------------------------------------------------------
-def main():
+def read_job_json(job_path: Path) -> dict:
+    with open(job_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def safe_xyz(x) -> Optional[list]:
+    if not isinstance(x, (list, tuple)) or len(x) < 3:
+        return None
+    try:
+        return [float(x[0]), float(x[1]), float(x[2])]
+    except Exception:
+        return None
+
+
+def write_throw_label(
+    dataset_root: Path,
+    *,
+    job_id: int,
+    target_x: Optional[float],
+    target_y: Optional[float],
+    job: dict,
+    throw_result: Optional[dict],
+    landing_zone: str,
+    success: bool,
+) -> None:
+    release_cmd = safe_xyz(job.get("release_xyz", None))
+    release_progress = job.get("release_progress", None)
+    xyz_tol = job.get("xyz_tolerance_mm", None)
+
+    release_actual = None
+    release_offset = None
+    min_dist = None
+
+    if throw_result:
+        release_actual = throw_result.get("release_xyz_actual", None)
+        min_dist = throw_result.get("min_dist_to_release_cmd_mm", None)
+
+    if release_cmd is not None and isinstance(release_actual, list) and len(release_actual) >= 3:
+        release_actual = [float(release_actual[0]), float(release_actual[1]), float(release_actual[2])]
+        release_offset = [
+            float(release_actual[0] - release_cmd[0]),
+            float(release_actual[1] - release_cmd[1]),
+            float(release_actual[2] - release_cmd[2]),
+        ]
+
+    label = {
+        "job_id": int(job_id),
+        "target_xy_mm": [float(target_x), float(target_y)] if (target_x is not None and target_y is not None) else None,
+
+        "release_xyz_cmd": release_cmd,
+        "release_progress": float(release_progress) if release_progress is not None else None,
+        "xyz_tolerance_mm": float(xyz_tol) if xyz_tol is not None else None,
+
+        "release_xyz_actual": release_actual,
+        "release_offset_mm": release_offset,
+        "min_dist_to_release_cmd_mm": min_dist,
+
+        "landing_zone": landing_zone,
+        "success": bool(success),
+
+        "throw_result_ok": None if throw_result is None else bool(throw_result.get("ok", False)),
+        "throw_error": None if throw_result is None else throw_result.get("error", None),
+        "tcp_samples": None if throw_result is None else throw_result.get("tcp_samples", None),
+    }
+
+    meta_dir = dataset_root / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    out_path = meta_dir / "throw_label.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(label, f, indent=2)
+
+
+def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--wurf", type=int, required=True)
+    ap.add_argument("--job", required=True, type=int, help="Job number N -> uses wuerfe/wurf_<N>.json")
+
+    ap.add_argument("--x", type=float, default=None, help="Target X (mm)")
+    ap.add_argument("--y", type=float, default=None, help="Target Y (mm)")
 
     ap.add_argument("--records-root", type=str, default="~/src/lite6xlerobot/records")
     ap.add_argument("--dataset-name", type=str, default="throws")
     ap.add_argument("--config-path", type=str, default="~/src/lite6xlerobot/configs/xarm_with_vitade.yaml")
-    ap.add_argument("--robot-ip", type=str, default="10.77.77.200")
-
-    # Cup input (Model-Condition)
-    ap.add_argument("--cup-x-mm", type=float, default=None)
-    ap.add_argument("--cup-y-mm", type=float, default=None)
-    ap.add_argument("--ask-cup", action="store_true", help="Wenn gesetzt, fragt immer nach cup_x/cup_y.")
 
     # detector (ball_finder)
     ap.add_argument("--cam", type=int, default=0)
@@ -393,77 +373,55 @@ def main():
     ap.add_argument("--init-acc", type=float, default=1.0)
 
     # recorder timing
-    ap.add_argument("--pre-rec-wait-s", type=float, default=7.0, help="Wartezeit nach Start lerobot_record")
-    ap.add_argument("--episode-time-s", type=float, default=15.0, help="dataset.episode_time_s")
+    ap.add_argument("--episode-time-s", type=float, default=15.0)
 
     args = ap.parse_args()
 
-    # --------------------------------------------------------
-    # Resolve repo paths
-    # --------------------------------------------------------
-    script_dir = Path(__file__).resolve().parent
-    repo_root = script_dir.parent if script_dir.name == "tools" else script_dir
+    if (args.x is None) ^ (args.y is None):
+        raise RuntimeError("Please provide BOTH --x and --y, or none.")
+
+    tools_dir = Path(__file__).resolve().parent
+    repo_root = tools_dir.parent
+
+    job_path = repo_root / "wuerfe" / f"wurf_{int(args.job)}.json"
+    if not job_path.exists():
+        raise RuntimeError(f"Job JSON not found: {job_path}")
+
+    throw_script = repo_root / "wuerfe" / "throw_from_job.py"
+    if not throw_script.exists():
+        raise RuntimeError(f"throw_from_job.py not found: {throw_script}")
 
     coord_dir = repo_root / "koordinaten"
     ball_script = coord_dir / "ball_finder.py"
     H_path = coord_dir / args.H
-
-    wurf_path = repo_root / "wuerfe" / f"wurf_{args.wurf}.py"
-
     if not ball_script.exists():
         raise RuntimeError(f"ball_finder.py not found: {ball_script}")
     if not H_path.exists():
         raise RuntimeError(f"H file not found: {H_path}")
-    if not wurf_path.exists():
-        raise RuntimeError(f"Wurfskript nicht gefunden: {wurf_path}")
 
-    # Read release_at from wurf script (statisch)
-    release_at = read_release_at_from_wurf(wurf_path)
-    if release_at is None:
-        print(f"[WARN] Konnte release_at nicht aus {wurf_path.name} lesen. "
-              f"Bitte im Wurfskript z.B. RELEASE_AT = 0.35 setzen.")
-
-    # dataset dirs
     records_root = Path(os.path.expanduser(args.records_root))
     dataset_parent = records_root / args.dataset_name
     dataset_parent.mkdir(parents=True, exist_ok=True)
 
-    run_name = f"fs_{time.strftime('%Y-%m-%d_%H-%M-%S')}_wurf{args.wurf:02d}"
-    dataset_root = make_unique_dir(dataset_parent / run_name)
+    run_name = f"fs_{time.strftime('%Y-%m-%d_%H-%M-%S')}_job_wurf_{int(args.job)}"
+    dataset_root = dataset_parent / run_name
 
-    # --------------------------------------------------------
-    # Cup XY (Model input)
-    # --------------------------------------------------------
-    cup_x = args.cup_x_mm
-    cup_y = args.cup_y_mm
-    if args.ask_cup or cup_x is None or cup_y is None:
-        print("[CUP] Bitte Cup-Koordinate (Input fürs Modell) eingeben (mm). 'skip' erlaubt.")
-        cx = ask_float("cup_x_mm: ")
-        cy = ask_float("cup_y_mm: ")
-        if cx is not None and cy is not None:
-            cup_x, cup_y = cx, cy
+    if dataset_root.exists():
+        shutil.rmtree(dataset_root)
 
-    print("\n=== RUN ===")
-    print("run_name  :", run_name)
-    print("wurf      :", wurf_path)
-    print("dataset   :", dataset_root)
-    if cup_x is not None and cup_y is not None:
-        print(f"cup_xy    : ({cup_x:.1f},{cup_y:.1f}) mm")
-    else:
-        print("cup_xy    : None")
-    print("release_at:", release_at)
-    print("============\n")
+    # Result JSON path from throw script (IPC)
+    result_path = Path("/tmp") / f"throw_result_job_{int(args.job)}_{int(time.time())}.json"
+    if result_path.exists():
+        try:
+            result_path.unlink()
+        except Exception:
+            pass
 
-    # --------------------------------------------------------
-    # 0) CONNECT ROBOT (direct control)
-    # --------------------------------------------------------
-    print("[ROBOT] Connect...")
-    arm = arm_connect(args.robot_ip)
+    arm = arm_connect()
+    rec_proc: Optional[subprocess.Popen] = None
 
     try:
-        # --------------------------------------------------------
         # 1) FIND BALL
-        # --------------------------------------------------------
         ball_cmd = [
             sys.executable,
             str(ball_script),
@@ -472,24 +430,16 @@ def main():
             "--device", args.device,
             "--once",
         ]
-
         print("[BALL] Searching...")
-        t_ball0 = time.time()
         ball = run_and_capture_first_ball(ball_cmd, timeout_s=args.ball_timeout_s, verbose=args.verbose_detectors)
-        t_ball1 = time.time()
-
         if ball is None:
             raise RuntimeError("Ball not found (timeout)")
+        print(f"[BALL] OK ({ball.x_mm:.1f},{ball.y_mm:.1f}) conf={ball.conf:.2f}")
 
-        print(f"[BALL] OK ({ball.x_mm:.1f},{ball.y_mm:.1f}) conf={ball.conf:.2f} (dt={t_ball1-t_ball0:.2f}s)")
-
-        # --------------------------------------------------------
         # 2) PICK BALL
-        # --------------------------------------------------------
         mapper = TableToRobot(os.path.expanduser(args.table_to_robot_yaml))
-        print("[PICK] Picking (top-down)...")
-        t_pick0 = time.time()
-        ok, pick_meta = pick_ball_topdown(
+        print("[PICK] Picking...")
+        ok, _ = pick_ball_topdown(
             arm,
             mapper,
             ball,
@@ -501,39 +451,30 @@ def main():
             pick_y_offset_mm=args.pick_y_offset_mm,
             pick_x_offset_mm=args.pick_x_offset_mm,
         )
-        t_pick1 = time.time()
         if not ok:
             raise RuntimeError("Pick failed")
-        print(f"[PICK] OK (dt={t_pick1-t_pick0:.2f}s)")
+        print("[PICK] OK")
 
-        # --------------------------------------------------------
         # 3) GO INIT POSE
-        # --------------------------------------------------------
         print("[POSE] go_init_pose...")
-        t_init0 = time.time()
         if not go_init_pose(arm, speed=args.init_speed, acc=args.init_acc, wait=True):
             raise RuntimeError("go_init_pose failed")
-        t_init1 = time.time()
-        print(f"[POSE] INIT reached (dt={t_init1-t_init0:.2f}s)")
+        print("[POSE] INIT reached")
 
-        # --------------------------------------------------------
-        # 4) START RECORDING (LeRobot)
-        # --------------------------------------------------------
+        # 4) START RECORDING (UNVERÄNDERT)
         record_cmd = [
             "python", "-m", "lerobot.scripts.lerobot_record",
             "--config_path", os.path.expanduser(args.config_path),
-            "--robot.ip", args.robot_ip,
+            "--robot.ip", ROBOT_IP,
 
-            # teleop: file_stream
             "--teleop.type", "file_stream",
             "--teleop.path", "/tmp/lerobot_cmd.json",
             "--teleop.stale_s", "0.25",
             "--teleop.arm_action_keys", '["joint1","joint2","joint3","joint4","joint5","joint6"]',
 
-            # dataset
             "--dataset.root", str(dataset_root),
             "--dataset.repo_id", f"local/{run_name}",
-            "--dataset.single_task", f"wurf_{args.wurf}",
+            "--dataset.single_task", f"throw_job_wurf_{int(args.job)}",
             "--dataset.push_to_hub", "false",
             "--dataset.num_episodes", "1",
             "--dataset.episode_time_s", str(args.episode_time_s),
@@ -542,104 +483,51 @@ def main():
         ]
 
         print("[REC] Starting lerobot_record...")
-        t_rec0 = time.time()
         rec_proc = subprocess.Popen(record_cmd)
-        time.sleep(max(0.0, float(args.pre_rec_wait_s)))
 
-        # --------------------------------------------------------
-        # 5) THROW (Wurfskript)
-        # --------------------------------------------------------
-        print("[THROW] Running wurf script...")
-        t_throw0 = time.time()
-        subprocess.check_call([sys.executable, str(wurf_path)])
-        t_throw1 = time.time()
-        print(f"[THROW] Done (dt={t_throw1-t_throw0:.2f}s)")
+        # 5) fixed wait 5s
+        time.sleep(5.0)
 
-        # lerobot_record should stop by itself after episode_time_s
-        rec_ret = rec_proc.wait()
-        t_rec1 = time.time()
-        if rec_ret != 0:
-            raise RuntimeError(f"lerobot_record exited with code {rec_ret}")
-        print(f"[REC] Done (total dt={t_rec1-t_rec0:.2f}s)")
+        # IMPORTANT: do NOT poll robot here while throw_from_job connects.
+        # We keep this arm connection only for pick/init stage; throw script uses its own connection.
 
-        # --------------------------------------------------------
-        # 6) LABEL (Target)
-        # --------------------------------------------------------
-        print("[LABEL] Eingabe (mm) – 'skip' wenn nicht gemessen.")
-        tx = ask_float("target_x_mm: ")
-        ty = ask_float("target_y_mm: ")
+        print(f"[THROW] Running throw_from_job on {job_path.name} ...")
+        subprocess.check_call([sys.executable, str(throw_script), "--job", str(job_path), "--result", str(result_path)])
+        print("[THROW] Done.")
 
-        chunk, file = find_latest_data_file(dataset_root)
+        # 6) read throw result
+        throw_result = None
+        if result_path.exists():
+            with open(result_path, "r", encoding="utf-8") as f:
+                throw_result = json.load(f)
 
-        # --------------------------------------------------------
-        # 7) LOG JSONL (everything we need)
-        # --------------------------------------------------------
-        label = {
-            "ts": now_iso_local(),
-            "run_name": run_name,
-            "dataset_name": args.dataset_name,
-            "dataset_root": str(dataset_root),
-            "wurf_id": args.wurf,
-            "wurf_path": str(wurf_path),
+        # 7) landing_zone per key
+        print("Landing-Zone: q w e / a s d / y x c   (s = HIT)")
+        k = read_single_key()
+        landing_zone = ZONE_MAP[k]
+        success = (k == "s")
+        print(f"[LABEL] landing_zone={landing_zone} success={success}")
 
-            # Data reference (join key)
-            "data_ref": {"chunk": chunk, "file": file, "episode_index": 0},
+        # 8) write label
+        job = read_job_json(job_path)
+        write_throw_label(
+            dataset_root,
+            job_id=int(args.job),
+            target_x=float(args.x) if args.x is not None else None,
+            target_y=float(args.y) if args.y is not None else None,
+            job=job,
+            throw_result=throw_result,
+            landing_zone=landing_zone,
+            success=success,
+        )
+        print("[LABEL] Wrote meta/throw_label.json")
 
-            # Model condition / input
-            "cup_xy_mm": [cup_x, cup_y] if cup_x is not None and cup_y is not None else None,
-
-            # Label / outcome (optional)
-            "target_xy_mm": [tx, ty] if tx is not None and ty is not None else None,
-
-            # Ball detection (table space)
-            "ball_xy_mm": [ball.x_mm, ball.y_mm],
-            "ball_conf": ball.conf,
-
-            # Pick & init metadata
-            "init_joints_rad": INIT_JOINTS_RAD,
-            "pick_meta": {
-                "robot_pick_xy_mm": pick_meta.get("robot_pick_xy_mm"),
-                "hover_z_mm": args.hover_z_mm,
-                "pick_z_mm": args.pick_z_mm,
-                "lift_z_mm": args.lift_z_mm,
-                "pick_y_offset_mm": args.pick_y_offset_mm,
-                "pick_x_offset_mm": args.pick_x_offset_mm,
-                "topdown_rpy_deg": [FIX_R, FIX_P, FIX_YAW],
-                "ik_speed": args.ik_speed,
-                "ik_acc": args.ik_acc,
-                "table_to_robot_yaml": os.path.expanduser(args.table_to_robot_yaml),
-            },
-
-            # Wurf parameters (nur das, was du wirklich brauchst)
-            "throw_params": {
-                "release_at": release_at,
-                "episode_time_s": float(args.episode_time_s),
-            },
-
-            # Detector configuration used
-            "detector": {
-                "cam": int(args.cam),
-                "H_path": str(H_path),
-                "device": args.device,
-                "ball_finder_cmd": ball_cmd,
-                "ball_timeout_s": float(args.ball_timeout_s),
-            },
-
-            # Orchestration timings
-            "timing_s": {
-                "ball_find": round(t_ball1 - t_ball0, 4),
-                "pick": round(t_pick1 - t_pick0, 4),
-                "go_init": round(t_init1 - t_init0, 4),
-                "throw": round(t_throw1 - t_throw0, 4),
-                "record_total": round(t_rec1 - t_rec0, 4),
-                "pre_rec_wait_s": float(args.pre_rec_wait_s),
-            },
-        }
-
-        labels_path = dataset_parent / "labels.jsonl"
-        append_jsonl(labels_path, label)
-        print("\n[OK] Appended ->", labels_path)
-        print("[OK] Done.\n")
+        # 9) keep terminal alive until recorder finished
+        print("[REC] Waiting until lerobot_record finishes...")
+        ret = rec_proc.wait()
+        if ret != 0:
+            raise RuntimeError(f"lerobot_record exited with code {ret}")
+        print("[REC] Done.")
 
     finally:
         try:
