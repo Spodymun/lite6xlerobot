@@ -10,7 +10,7 @@ Ablauf:
 5) 5 Sekunden warten
 6) wuerfe/throw_from_job.py mit --job ausführen + --result /tmp/throw_result.json
 7) Landing-Zone per 1-Taste labeln (q/w/e/a/s/d/y/x/c, s=hit)
-8) meta/throw_label.json schreiben (inkl. release_xyz_actual aus result)
+8) meta/throw_label.json schreiben (TRAINING-PERFEKT: target + pos1/pos2 + release_progress + landing_zone + success + job_id + ts + run_name)
 9) Terminal bleibt aktiv bis LeRobot fertig aufgenommen hat (rec_proc.wait())
 """
 
@@ -273,64 +273,53 @@ def read_job_json(job_path: Path) -> dict:
         return json.load(f)
 
 
-def safe_xyz(x) -> Optional[list]:
-    if not isinstance(x, (list, tuple)) or len(x) < 3:
+def _safe_joint6(x) -> Optional[list]:
+    if not isinstance(x, (list, tuple)) or len(x) != 6:
         return None
     try:
-        return [float(x[0]), float(x[1]), float(x[2])]
+        return [float(v) for v in x]
     except Exception:
         return None
 
 
-def write_throw_label(
+def write_throw_label_training_perfect(
     dataset_root: Path,
     *,
+    run_name: str,
     job_id: int,
     target_x: Optional[float],
     target_y: Optional[float],
     job: dict,
-    throw_result: Optional[dict],
     landing_zone: str,
     success: bool,
 ) -> None:
-    release_cmd = safe_xyz(job.get("release_xyz", None))
-    release_progress = job.get("release_progress", None)
-    xyz_tol = job.get("xyz_tolerance_mm", None)
+    """
+    Writes ONLY the fields you actually want for training (stable, reproducible):
+      job_id, ts, run_name, target_xy_mm, pos1, pos2, release_progress, landing_zone, success
+    """
+    pos1 = _safe_joint6(job.get("pos1", None))
+    pos2 = _safe_joint6(job.get("pos2", None))
+    if pos1 is None or pos2 is None:
+        raise RuntimeError("Job JSON missing pos1/pos2 (each must be 6 joint angles in rad).")
 
-    release_actual = None
-    release_offset = None
-    min_dist = None
-
-    if throw_result:
-        release_actual = throw_result.get("release_xyz_actual", None)
-        min_dist = throw_result.get("min_dist_to_release_cmd_mm", None)
-
-    if release_cmd is not None and isinstance(release_actual, list) and len(release_actual) >= 3:
-        release_actual = [float(release_actual[0]), float(release_actual[1]), float(release_actual[2])]
-        release_offset = [
-            float(release_actual[0] - release_cmd[0]),
-            float(release_actual[1] - release_cmd[1]),
-            float(release_actual[2] - release_cmd[2]),
-        ]
+    rp = job.get("release_progress", None)
+    if rp is None:
+        raise RuntimeError("Job JSON missing release_progress.")
+    rp = float(rp)
 
     label = {
         "job_id": int(job_id),
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+        "run_name": str(run_name),
+
         "target_xy_mm": [float(target_x), float(target_y)] if (target_x is not None and target_y is not None) else None,
 
-        "release_xyz_cmd": release_cmd,
-        "release_progress": float(release_progress) if release_progress is not None else None,
-        "xyz_tolerance_mm": float(xyz_tol) if xyz_tol is not None else None,
+        "pos1": pos1,
+        "pos2": pos2,
+        "release_progress": rp,
 
-        "release_xyz_actual": release_actual,
-        "release_offset_mm": release_offset,
-        "min_dist_to_release_cmd_mm": min_dist,
-
-        "landing_zone": landing_zone,
+        "landing_zone": str(landing_zone),
         "success": bool(success),
-
-        "throw_result_ok": None if throw_result is None else bool(throw_result.get("ok", False)),
-        "throw_error": None if throw_result is None else throw_result.get("error", None),
-        "tcp_samples": None if throw_result is None else throw_result.get("tcp_samples", None),
     }
 
     meta_dir = dataset_root / "meta"
@@ -360,8 +349,8 @@ def main() -> None:
 
     # mapping + pick
     ap.add_argument("--table-to-robot-yaml", type=str, default="~/src/lite6xlerobot/calibrate/table_to_robot.yaml")
-    ap.add_argument("--pick-y-offset-mm", type=float, default=-27.0)
-    ap.add_argument("--pick-x-offset-mm", type=float, default=3.7)
+    ap.add_argument("--pick-y-offset-mm", type=float, default=-23.0)
+    ap.add_argument("--pick-x-offset-mm", type=float, default=1.7)
     ap.add_argument("--hover-z-mm", type=float, default=100.0)
     ap.add_argument("--pick-z-mm", type=float, default=15.5)
     ap.add_argument("--lift-z-mm", type=float, default=120.0)
@@ -409,7 +398,7 @@ def main() -> None:
     if dataset_root.exists():
         shutil.rmtree(dataset_root)
 
-    # Result JSON path from throw script (IPC)
+    # Result JSON path from throw script (IPC) - still passed, but not used for training label
     result_path = Path("/tmp") / f"throw_result_job_{int(args.job)}_{int(time.time())}.json"
     if result_path.exists():
         try:
@@ -488,18 +477,9 @@ def main() -> None:
         # 5) fixed wait 5s
         time.sleep(5.0)
 
-        # IMPORTANT: do NOT poll robot here while throw_from_job connects.
-        # We keep this arm connection only for pick/init stage; throw script uses its own connection.
-
         print(f"[THROW] Running throw_from_job on {job_path.name} ...")
         subprocess.check_call([sys.executable, str(throw_script), "--job", str(job_path), "--result", str(result_path)])
         print("[THROW] Done.")
-
-        # 6) read throw result
-        throw_result = None
-        if result_path.exists():
-            with open(result_path, "r", encoding="utf-8") as f:
-                throw_result = json.load(f)
 
         # 7) landing_zone per key
         print("Landing-Zone: q w e / a s d / y x c   (s = HIT)")
@@ -508,15 +488,15 @@ def main() -> None:
         success = (k == "s")
         print(f"[LABEL] landing_zone={landing_zone} success={success}")
 
-        # 8) write label
+        # 8) write TRAINING PERFECT label
         job = read_job_json(job_path)
-        write_throw_label(
+        write_throw_label_training_perfect(
             dataset_root,
+            run_name=run_name,
             job_id=int(args.job),
             target_x=float(args.x) if args.x is not None else None,
             target_y=float(args.y) if args.y is not None else None,
             job=job,
-            throw_result=throw_result,
             landing_zone=landing_zone,
             success=success,
         )
