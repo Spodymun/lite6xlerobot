@@ -1,0 +1,5 @@
+path: datasets/ball_mini
+train: images/train
+val: images/val
+names:
+  0: mini_ball

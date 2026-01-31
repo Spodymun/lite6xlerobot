@@ -165,8 +165,8 @@ def main():
         time.sleep(SETTLE_S)
 
         # Prep
-        arm.close_lite6_gripper(sync=True)
-        time.sleep(0.1)
+        arm.close_lite6_gripper(sync=False)
+        time.sleep(1.0)
 
         # Go pos1 slow
         move_j(arm, pos1, SLOW_SPEED_DEG_S, ACCEL_DEG_S2, True, "pos1")

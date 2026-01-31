@@ -37,7 +37,7 @@ def map_table_to_robot(A: np.ndarray, b: np.ndarray, xt: float, yt: float):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ip", type=str, required=True, help="Robot IP, z.B. 10.77.77.200")
+    ap.add_argument("--ip", type=str, default="10.77.77.200", help="Robot IP, z.B. 10.77.77.200")
     ap.add_argument("--calib", type=str, default="table_to_robot.yaml", help="table_to_robot.yaml")
     ap.add_argument("--xt", type=float, required=True, help="Tisch X (mm)")
     ap.add_argument("--yt", type=float, required=True, help="Tisch Y (mm)")

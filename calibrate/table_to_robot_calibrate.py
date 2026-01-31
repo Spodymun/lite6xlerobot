@@ -95,7 +95,7 @@ def fit_affine_2d(table_xy: np.ndarray, robot_xy: np.ndarray):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ip", type=str, required=True, help="Robot IP (xArm), e.g. 10.77.77.200")
+    ap.add_argument("--ip", type=str, default="10.77.77.200", help="Robot IP (xArm), e.g. 10.77.77.200")
     ap.add_argument("--out", type=str, default="table_to_robot.yaml")
     ap.add_argument("--speed", type=float, default=50.0, help="(optional) for future auto moves, not used here")
     ap.add_argument("--acc", type=float, default=200.0, help="(optional) for future auto moves, not used here")

@@ -58,11 +58,11 @@ def main():
                     help="Exit after first valid BALL_MM output")
 
     ap.add_argument("--weights", type=str,
-                    default="/home/nelly/src/lite6xlerobot/ball_erkennung/runs/detect/train/weights/best.pt",
+                    default="/home/nelly/src/lite6xlerobot/ball_erkennung/runs/detect/train2/weights/best.pt",
                     help="YOLO weights path")
     ap.add_argument("--conf", type=float, default=0.35, help="YOLO confidence threshold")
 
-    ap.add_argument("--ball-class", type=str, default="ball",
+    ap.add_argument("--ball-class", type=str, default="mini_ball",
                     help="YOLO class name to treat as ball")
 
     ap.add_argument("--use-black-check", action="store_true",
