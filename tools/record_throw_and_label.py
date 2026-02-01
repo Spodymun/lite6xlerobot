@@ -6,13 +6,18 @@ Ablauf:
 1) Ball finden (koordinaten/ball_finder.py -> "BALL_MM x y conf")
 2) Ball aufnehmen (Top-Down Pick, IK, fixed RPY)
 3) INIT Pose anfahren (fest im Code)
-4) LeRobot Recording starten (UNVERÄNDERT!)
+4) LeRobot Recording starten
 5) 5 Sekunden warten
 6) wuerfe/throw_from_job.py mit --job ausführen + --result /tmp/throw_result.json
 7) Landing-Zone per 1-Taste labeln (q/w/e/a/s/d/y/x/c, s=hit)
-8) meta/throw_label.json schreiben (TRAINING-PERFEKT: target + pos1/pos2 + release_progress + landing_zone + success + job_id + ts + run_name)
-9) Terminal bleibt aktiv bis LeRobot fertig aufgenommen hat (rec_proc.wait())
+8) meta/throw_label.json schreiben (target + pos1/pos2 + release_progress + landing_zone + success + job_id + ts + run_name)
+9) Warten bis LeRobot fertig ist (rec_proc.wait())
+10) Danach automatisch patchen:
+    - action[t] = state[t+1]
+    - observation.task = target_xy_mm (aus job.json)
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -47,6 +52,7 @@ INIT_JOINTS_RAD = [
     -1.570796,
 ]
 
+# fixed RPY for top-down pick
 FIX_R, FIX_P, FIX_YAW = -180, 0, 0
 
 
@@ -273,6 +279,11 @@ def read_job_json(job_path: Path) -> dict:
         return json.load(f)
 
 
+def write_job_json(job_path: Path, job: dict) -> None:
+    with open(job_path, "w", encoding="utf-8") as f:
+        json.dump(job, f, indent=2)
+
+
 def _safe_joint6(x) -> Optional[list]:
     if not isinstance(x, (list, tuple)) or len(x) != 6:
         return None
@@ -293,10 +304,6 @@ def write_throw_label_training_perfect(
     landing_zone: str,
     success: bool,
 ) -> None:
-    """
-    Writes ONLY the fields you actually want for training (stable, reproducible):
-      job_id, ts, run_name, target_xy_mm, pos1, pos2, release_progress, landing_zone, success
-    """
     pos1 = _safe_joint6(job.get("pos1", None))
     pos2 = _safe_joint6(job.get("pos2", None))
     if pos1 is None or pos2 is None:
@@ -311,13 +318,10 @@ def write_throw_label_training_perfect(
         "job_id": int(job_id),
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
         "run_name": str(run_name),
-
         "target_xy_mm": [float(target_x), float(target_y)] if (target_x is not None and target_y is not None) else None,
-
         "pos1": pos1,
         "pos2": pos2,
         "release_progress": rp,
-
         "landing_zone": str(landing_zone),
         "success": bool(success),
     }
@@ -327,6 +331,27 @@ def write_throw_label_training_perfect(
     out_path = meta_dir / "throw_label.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(label, f, indent=2)
+
+
+def run_auto_patch(dataset_root: Path, job_path: Path) -> None:
+    """
+    Calls tools/patch_actions.py (same folder as this script) to patch:
+      - action[t] = state[t+1]
+      - observation.task = target_xy_mm (from job.json)
+    """
+    parquet_path = dataset_root / "data" / "chunk-000" / "file-000.parquet"
+    if not parquet_path.exists():
+        raise RuntimeError(f"Expected parquet not found: {parquet_path}")
+
+    tools_dir = Path(__file__).resolve().parent
+    patch_script = tools_dir / "patch_actions.py"
+    if not patch_script.exists():
+        raise RuntimeError(f"patch_actions.py not found next to record_throw_and_label.py: {patch_script}")
+
+    cmd = [sys.executable, str(patch_script), "--parquet", str(parquet_path), "--job", str(job_path)]
+    print("[PATCH] Running:", " ".join(cmd))
+    subprocess.check_call(cmd)
+    print("[PATCH] Done. (action + observation.task written)")
 
 
 def main() -> None:
@@ -398,7 +423,6 @@ def main() -> None:
     if dataset_root.exists():
         shutil.rmtree(dataset_root)
 
-    # Result JSON path from throw script (IPC) - still passed, but not used for training label
     result_path = Path("/tmp") / f"throw_result_job_{int(args.job)}_{int(time.time())}.json"
     if result_path.exists():
         try:
@@ -450,7 +474,14 @@ def main() -> None:
             raise RuntimeError("go_init_pose failed")
         print("[POSE] INIT reached")
 
-        # 4) START RECORDING (UNVERÄNDERT)
+        # 3.5) WRITE target_xy_mm into job (so patch_actions.py can read it)
+        if args.x is not None and args.y is not None:
+            job = read_job_json(job_path)
+            job["target_xy_mm"] = [float(args.x), float(args.y)]
+            write_job_json(job_path, job)
+            print(f"[JOB] Updated {job_path.name}: target_xy_mm={job['target_xy_mm']}")
+
+        # 4) START RECORDING
         record_cmd = [
             "python", "-m", "lerobot.scripts.lerobot_record",
             "--config_path", os.path.expanduser(args.config_path),
@@ -477,6 +508,7 @@ def main() -> None:
         # 5) fixed wait 5s
         time.sleep(5.0)
 
+        # 6) throw
         print(f"[THROW] Running throw_from_job on {job_path.name} ...")
         subprocess.check_call([sys.executable, str(throw_script), "--job", str(job_path), "--result", str(result_path)])
         print("[THROW] Done.")
@@ -488,26 +520,32 @@ def main() -> None:
         success = (k == "s")
         print(f"[LABEL] landing_zone={landing_zone} success={success}")
 
-        # 8) write TRAINING PERFECT label
-        job = read_job_json(job_path)
+        # 8) write label
+        job_for_label = read_job_json(job_path)
         write_throw_label_training_perfect(
             dataset_root,
             run_name=run_name,
             job_id=int(args.job),
             target_x=float(args.x) if args.x is not None else None,
             target_y=float(args.y) if args.y is not None else None,
-            job=job,
+            job=job_for_label,
             landing_zone=landing_zone,
             success=success,
         )
         print("[LABEL] Wrote meta/throw_label.json")
 
-        # 9) keep terminal alive until recorder finished
+        # 9) wait for recorder
         print("[REC] Waiting until lerobot_record finishes...")
         ret = rec_proc.wait()
         if ret != 0:
             raise RuntimeError(f"lerobot_record exited with code {ret}")
         print("[REC] Done.")
+
+        # 10) auto patch parquet (action + observation.task)
+        if args.x is not None and args.y is not None:
+            run_auto_patch(dataset_root, job_path)
+        else:
+            print("[PATCH] Skipped (no --x/--y provided).")
 
     finally:
         try:
