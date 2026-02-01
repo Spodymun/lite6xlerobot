@@ -2,22 +2,20 @@
 """
 patch_actions.py
 
-Adds / overwrites the `action` column in a LeRobot parquet file.
+Patches a LeRobot parquet so it becomes trainable for "target_xy -> throw".
 
-Default (recommended):
-  action[t] = observation.state[t+1]
-Last frame:
-  action[last] = action[last-1]
-
-This is fully compatible with LeRobot BC training and reproducible
-for external-script-controlled robots.
+It writes:
+  1) action[t] = observation.state[t+1]   (default)
+  2) observation.task = target_xy_mm      (constant per frame, taken from --job)
 
 Usage:
-  python3 patch_actions.py --parquet /path/to/file-000.parquet
-  python3 patch_actions.py --parquet ... --mode delta
+  python3 patch_actions.py --parquet /path/to/file-000.parquet --job /path/to/wurf_1.json
+  python3 patch_actions.py --parquet ... --job ... --mode delta
+  python3 patch_actions.py --parquet ... --job ... --task-col observation.task
 """
 
 import argparse
+import json
 import shutil
 from pathlib import Path
 
@@ -80,6 +78,22 @@ def ensure_list_float(state: pa.Array) -> pa.Array:
     raise RuntimeError(f"Unsupported state column type: {t}")
 
 
+def upsert_column(table: pa.Table, name: str, col: pa.Array) -> pa.Table:
+    """Replace column if exists, else append."""
+    if name in table.column_names:
+        idx = table.column_names.index(name)
+        return table.set_column(idx, name, col)
+    return table.append_column(name, col)
+
+
+def make_task_array(n_rows: int, x: float, y: float) -> pa.Array:
+    """
+    FixedSizeList<float32>[2] per row: [x, y]
+    """
+    values = pa.array([x, y] * n_rows, type=pa.float32())
+    return pa.FixedSizeListArray.from_arrays(values, list_size=2)
+
+
 # ------------------------------------------------------------
 # Action builders
 # ------------------------------------------------------------
@@ -114,12 +128,20 @@ def make_action_delta(state: pa.Array) -> pa.Array:
     return pa.concat_arrays([delta, last])
 
 
-def upsert_column(table: pa.Table, name: str, col: pa.Array) -> pa.Table:
-    """Replace column if exists, else append."""
-    if name in table.column_names:
-        idx = table.column_names.index(name)
-        return table.set_column(idx, name, col)
-    return table.append_column(name, col)
+# ------------------------------------------------------------
+# Job loader
+# ------------------------------------------------------------
+
+def load_target_xy(job_path: Path) -> tuple[float, float]:
+    with job_path.open("r") as f:
+        job = json.load(f)
+    if "target_xy_mm" not in job:
+        raise RuntimeError(
+            f"{job_path} has no 'target_xy_mm'. "
+            "Add e.g. \"target_xy_mm\": [360.0, 410.7]"
+        )
+    x, y = job["target_xy_mm"]
+    return float(x), float(y)
 
 
 # ------------------------------------------------------------
@@ -130,20 +152,28 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--parquet", required=True,
                     help="Path to LeRobot data parquet (file-000.parquet)")
+    ap.add_argument("--job", required=True,
+                    help="Path to your job json (must contain target_xy_mm)")
     ap.add_argument("--mode", choices=["next_state", "delta"],
                     default="next_state",
                     help="Action definition (default: next_state)")
     ap.add_argument("--state-col", default=None,
                     help="Override state column (e.g. observation.state)")
     ap.add_argument("--action-col", default="action",
-                    help="Action column name (default: action)")
+                    help="Action column name to write (default: action)")
+    ap.add_argument("--task-col", default="observation.task",
+                    help="Task/target column name (default: observation.task)")
     ap.add_argument("--no-backup", action="store_true",
                     help="Do not create .bak backup")
     args = ap.parse_args()
 
     p = Path(args.parquet)
+    job_path = Path(args.job)
+
     if not p.exists():
         raise SystemExit(f"File not found: {p}")
+    if not job_path.exists():
+        raise SystemExit(f"Job not found: {job_path}")
 
     if not args.no_backup:
         bak = p.with_suffix(p.suffix + ".bak")
@@ -151,8 +181,13 @@ def main():
             shutil.copy2(p, bak)
             print(f"[ok] backup written: {bak}")
 
+    # Load target from job
+    tx, ty = load_target_xy(job_path)
+
+    # Load parquet
     table = pq.read_table(p)
 
+    # Build action from state
     state_name, state = find_state_column(table, args.state_col)
     state = ensure_list_float(state)
 
@@ -164,7 +199,12 @@ def main():
     if len(action) != table.num_rows:
         raise RuntimeError("Action length mismatch.")
 
+    # Build task column
+    task = make_task_array(table.num_rows, tx, ty)
+
+    # Upsert
     table2 = upsert_column(table, args.action_col, action)
+    table2 = upsert_column(table2, args.task_col, task)
 
     # Preserve metadata
     if table.schema.metadata:
@@ -172,11 +212,14 @@ def main():
 
     pq.write_table(table2, p)
 
-    print("[ok] action column written")
+    print("[ok] patched dataset")
     print(f"     parquet     : {p}")
+    print(f"     job         : {job_path}")
+    print(f"     target_xy_mm: [{tx}, {ty}]")
     print(f"     state source: {state_name}")
     print(f"     mode        : {args.mode}")
     print(f"     action col  : {args.action_col}")
+    print(f"     task col    : {args.task_col}")
     print(f"     rows        : {table.num_rows}")
 
 
