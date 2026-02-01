@@ -230,7 +230,7 @@ def pick_ball_topdown(
         return None
 
     arm.open_lite6_gripper(sync=True)
-    time.sleep(0.10)
+    time.sleep(1.0)
 
     rx, ry = mapper.map(ball.x_mm, ball.y_mm)
     rx = rx + float(pick_x_offset_mm)
@@ -353,7 +353,7 @@ def run_auto_patch(dataset_root: Path, job_path: Path) -> None:
     cmd = [
         sys.executable,
         str(patch_script),
-        "--parquet", str(parquet_path),
+        "--dataset-root", str(dataset_root),
         "--job", str(job_path),
     ]
 

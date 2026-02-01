@@ -1,0 +1,61 @@
+dataset:
+  repo_id: local/xarm_throws
+  root: .
+
+env:
+  type: gym_manipulator
+  disable_env_checker: true
+  fps: 30
+  max_parallel_tasks: 1
+  name: real_robot
+  features:
+    env:    {type: ENV,    shape: [9]}
+    action: {type: ACTION, shape: [13]}
+  features_map:
+    env:
+      - observation.environment_state
+    action:
+      - action
+
+policy:
+  type: act
+  device: cpu
+  push_to_hub: false
+  use_amp: false
+  input_features:
+    env: {type: ENV, shape: [9]}
+  output_features:
+    action: {type: ACTION, shape: [13]}
+  normalization_mapping:
+    ENV: IDENTITY
+    ACTION: IDENTITY
+
+# smoke
+steps: 1
+batch_size: 8
+num_workers: 0
+log_freq: 1
+save_checkpoint: false
+eval_freq: 999999999
+eval:
+  batch_size: 1
+  n_episodes: 1
+  use_async_envs: false
+
+use_policy_training_preset: false
+optimizer:
+  type: adamw
+  lr: 0.0001
+  weight_decay: 0.0001
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  grad_clip_norm: 10.0
+scheduler:
+  type: cosine_decay_with_warmup
+  peak_lr: 0.0001
+  decay_lr: 0.0001
+  num_warmup_steps: 0
+  num_decay_steps: 1
+
+wandb:
+  enable: false

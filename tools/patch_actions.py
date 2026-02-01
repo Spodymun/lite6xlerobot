@@ -1,30 +1,46 @@
 #!/usr/bin/env python3
 """
-tools/patch_actions.py (PARAMETER POLICY)
+tools/patch_actions.py (PARAMETER POLICY, REPRODUCIBLE)
 
 Makes a LeRobot dataset trainable for a *parameter policy*:
 
-  (observation.state + observation.task[target_xy]) -> action(params)
+  input:  observation.environment_state = concat(observation.state, observation.task)
+          where:
+            observation.state = [6 joint pos + gripper]  -> 7 floats
+            observation.task  = target_xy_mm             -> 2 floats
+          => environment_state = 9 floats
 
-Where:
-  observation.task = target_xy_mm (constant per frame, from job.json)
-  action = [pos1(6), pos2(6), release_progress(1)]  -> 13 floats, constant per frame
+  output: action params = [pos1(6), pos2(6), release_progress(1)] -> 13 floats
 
-No action_raw. No rate limiting. No servo-style next-state actions.
+Also patches meta/info.json + meta/stats.json to match the parquet schema,
+and enforces a stable, replay-safe column order.
 
-Usage:
+Usage examples:
+
+  # patch single parquet in a run dir
   python3 tools/patch_actions.py \
-    --parquet /path/to/dataset/data/chunk-000/file-000.parquet \
-    --job     /path/to/wuerfe/wurf_1.json
+    --parquet records/throws/<RUN>/data/chunk-000/file-000.parquet \
+    --job     wuerfe/wurf_1.json
+
+  # patch an entire run (all parquet files inside data/)
+  python3 tools/patch_actions.py \
+    --dataset-root records/throws/<RUN> \
+    --job          wuerfe/wurf_1.json
+
+Notes:
+- Requires pyarrow (LeRobot env typically has it).
+- Creates .bak backups once per file unless --no-backup.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 from collections import OrderedDict
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 import pyarrow as pa
@@ -50,21 +66,51 @@ def upsert_column(table: pa.Table, name: str, col: pa.Array) -> pa.Table:
     return table.append_column(name, col)
 
 
+def fixed_list(values: np.ndarray, list_size: int) -> pa.FixedSizeListArray:
+    """
+    values: (N, list_size) float32
+    """
+    values = np.asarray(values, dtype=np.float32)
+    assert values.ndim == 2 and values.shape[1] == list_size
+    flat = pa.array(values.reshape(-1).tolist(), type=pa.float32())
+    return pa.FixedSizeListArray.from_arrays(flat, list_size=list_size)
+
+
 def make_task_array(n_rows: int, x: float, y: float) -> pa.FixedSizeListArray:
     """FixedSizeList<float32>[2] per row: [x, y]"""
-    values = pa.array([x, y] * n_rows, type=pa.float32())
-    return pa.FixedSizeListArray.from_arrays(values, list_size=2)
+    v = np.tile(np.array([[x, y]], dtype=np.float32), (n_rows, 1))
+    return fixed_list(v, 2)
 
 
-def make_action_params_array(n_rows: int, params: np.ndarray) -> pa.FixedSizeListArray:
+def make_action_params_array(n_rows: int, params13: np.ndarray) -> pa.FixedSizeListArray:
+    """FixedSizeList<float32>[13] repeated for n_rows"""
+    params13 = np.asarray(params13, dtype=np.float32).reshape(13,)
+    v = np.tile(params13[None, :], (n_rows, 1))
+    return fixed_list(v, 13)
+
+
+def compute_env_state(table: pa.Table) -> pa.FixedSizeListArray:
     """
-    params: (13,) float32
-    returns FixedSizeList<float32>[13] repeated for n_rows
+    observation.environment_state = concat(observation.state (7), observation.task (2)) -> 9
+    Expects both columns to exist and be list-like.
     """
-    params = np.asarray(params, dtype=np.float32).reshape(13,)
-    flat = np.tile(params, n_rows).astype(np.float32)
-    flat_arr = pa.array(flat.tolist(), type=pa.float32())
-    return pa.FixedSizeListArray.from_arrays(flat_arr, list_size=13)
+    s = to_array(table["observation.state"]).to_numpy(zero_copy_only=False)
+    t = to_array(table["observation.task"]).to_numpy(zero_copy_only=False)
+
+    s = np.asarray(s, dtype=object)  # each row is a list/ndarray
+    t = np.asarray(t, dtype=object)
+
+    out = np.zeros((table.num_rows, 9), dtype=np.float32)
+    for i in range(table.num_rows):
+        sv = np.asarray(s[i], dtype=np.float32).reshape(-1)
+        tv = np.asarray(t[i], dtype=np.float32).reshape(-1)
+        if sv.shape[0] != 7:
+            raise RuntimeError(f"row {i}: observation.state expected 7, got {sv.shape[0]}")
+        if tv.shape[0] != 2:
+            raise RuntimeError(f"row {i}: observation.task expected 2, got {tv.shape[0]}")
+        out[i, :7] = sv
+        out[i, 7:] = tv
+    return fixed_list(out, 9)
 
 
 # -----------------------------
@@ -82,6 +128,9 @@ def require_job_fields(job: dict, job_path: Path):
         if k not in job:
             raise RuntimeError(f"{job_path} missing '{k}'. Required: {needed}")
 
+    if not (isinstance(job["target_xy_mm"], list) and len(job["target_xy_mm"]) == 2):
+        raise RuntimeError(f"{job_path}: 'target_xy_mm' must be list[2]")
+
     if not (isinstance(job["pos1"], list) and len(job["pos1"]) == 6):
         raise RuntimeError(f"{job_path}: 'pos1' must be list[6] (rad).")
     if not (isinstance(job["pos2"], list) and len(job["pos2"]) == 6):
@@ -93,17 +142,15 @@ def require_job_fields(job: dict, job_path: Path):
 
 
 # -----------------------------
-# info.json patch (and enforce feature order)
+# meta/info.json patch
 # -----------------------------
 
-def patch_info_json(parquet_path: Path, *, want_feature_order: list[str]) -> None:
-    """
-    Ensures meta/info.json contains:
-      - features['observation.task'] shape [2]
-      - features['action'] shape [13]
-    And reorders features keys to exactly want_feature_order (so replay schema matches).
-    """
-    dataset_root = parquet_path.parents[2]  # .../data/chunk-000/file-000.parquet -> dataset_root
+def dataset_root_from_parquet(parquet_path: Path) -> Path:
+    # .../<run>/data/chunk-000/file-000.parquet -> <run>
+    return parquet_path.parents[2]
+
+
+def patch_info_json(dataset_root: Path, *, feature_order: list[str]) -> None:
     info_path = dataset_root / "meta" / "info.json"
     if not info_path.exists():
         raise FileNotFoundError(f"meta/info.json not found: {info_path}")
@@ -114,14 +161,7 @@ def patch_info_json(parquet_path: Path, *, want_feature_order: list[str]) -> Non
         feats = {}
         info["features"] = feats
 
-    # Ensure observation.task
-    feats.setdefault("observation.task", {
-        "dtype": "float32",
-        "names": ["target_x_mm", "target_y_mm"],
-        "shape": [2],
-    })
-
-    # Ensure action = 13 params
+    # action 13
     feats["action"] = {
         "dtype": "float32",
         "names": [
@@ -132,37 +172,165 @@ def patch_info_json(parquet_path: Path, *, want_feature_order: list[str]) -> Non
         "shape": [13],
     }
 
-    # Reorder features keys to match parquet columns exactly
+    # observation.task 2
+    feats["observation.task"] = {
+        "dtype": "float32",
+        "names": ["target_x_mm", "target_y_mm"],
+        "shape": [2],
+    }
+
+    # observation.environment_state 9
+    feats["observation.environment_state"] = {
+        "dtype": "float32",
+        "names": [
+            "joint1.pos","joint2.pos","joint3.pos","joint4.pos","joint5.pos","joint6.pos","gripper.pos",
+            "target_x_mm","target_y_mm",
+        ],
+        "shape": [9],
+    }
+
+    # Enforce exact order
     new_feats = OrderedDict()
-    for k in want_feature_order:
+    for k in feature_order:
         if k not in feats:
-            raise RuntimeError(f"info.json features missing '{k}' but parquet has it. Fix your dataset.")
+            raise RuntimeError(f"info.json missing feature '{k}' (but parquet has it).")
         new_feats[k] = feats[k]
     info["features"] = new_feats
 
-    # backup once
     bak = info_path.with_suffix(info_path.suffix + ".bak")
     if not bak.exists():
         shutil.copy2(info_path, bak)
-        print(f"[ok] info.json backup written: {bak}")
+        print(f"[ok] info.json backup: {bak}")
 
     info_path.write_text(json.dumps(info, indent=2), encoding="utf-8")
     print(f"[ok] patched info.json: {info_path}")
 
 
-def reorder_table_to_feature_order(table: pa.Table, feature_order: list[str]) -> pa.Table:
+# -----------------------------
+# meta/stats.json patch
+# -----------------------------
+
+def _stats_for_matrix(x: np.ndarray) -> dict:
+    """
+    x: (N, D) float32/float64
+    returns LeRobot-style stats dict with min/max/mean/std/count/q01/q10/q50/q90/q99 as lists
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if x.ndim == 1:
+        x = x[:, None]
+    N, D = x.shape
+
+    # avoid NaN propagation
+    if not np.isfinite(x).all():
+        raise RuntimeError("Non-finite values in dataset (NaN/Inf). Fix before training.")
+
+    qs = np.quantile(x, [0.01, 0.10, 0.50, 0.90, 0.99], axis=0, method="linear")
+
+    out = {
+        "min":  np.min(x, axis=0).tolist(),
+        "max":  np.max(x, axis=0).tolist(),
+        "mean": np.mean(x, axis=0).tolist(),
+        "std":  np.std(x, axis=0, ddof=0).tolist(),
+        "count": [int(N)] * D,
+        "q01": qs[0].tolist(),
+        "q10": qs[1].tolist(),
+        "q50": qs[2].tolist(),
+        "q90": qs[3].tolist(),
+        "q99": qs[4].tolist(),
+    }
+    return out
+
+
+def patch_stats_json(dataset_root: Path, table: pa.Table, feature_order: list[str]) -> None:
+    stats_path = dataset_root / "meta" / "stats.json"
+    if not stats_path.exists():
+        raise FileNotFoundError(f"meta/stats.json not found: {stats_path}")
+
+    # We compute stats for every feature in feature_order (no surprises).
+    stats = OrderedDict()
+    for name in feature_order:
+        col = to_array(table[name])
+
+        # scalars
+        if pa.types.is_integer(col.type) or pa.types.is_floating(col.type):
+            x = np.asarray(col.to_numpy(zero_copy_only=False), dtype=np.float64)
+            stats[name] = _stats_for_matrix(x)
+            continue
+
+        # fixed size list of float
+        if pa.types.is_fixed_size_list(col.type):
+            # to_numpy gives object array; convert row-wise
+            obj = np.asarray(col.to_numpy(zero_copy_only=False), dtype=object)
+            D = col.type.list_size
+            x = np.zeros((len(obj), D), dtype=np.float64)
+            for i in range(len(obj)):
+                v = np.asarray(obj[i], dtype=np.float64).reshape(-1)
+                if v.shape[0] != D:
+                    raise RuntimeError(f"{name}: expected {D}, got {v.shape[0]} at row {i}")
+                x[i] = v
+            stats[name] = _stats_for_matrix(x)
+            continue
+
+        # variable list -> not expected here
+        raise RuntimeError(f"Unsupported column type for stats: {name} -> {col.type}")
+
+    bak = stats_path.with_suffix(stats_path.suffix + ".bak")
+    if not bak.exists():
+        shutil.copy2(stats_path, bak)
+        print(f"[ok] stats.json backup: {bak}")
+
+    stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+    print(f"[ok] patched stats.json: {stats_path}")
+
+
+# -----------------------------
+# Column order
+# -----------------------------
+
+def enforce_feature_order(table: pa.Table, feature_order: list[str]) -> pa.Table:
     missing = [c for c in feature_order if c not in table.column_names]
     if missing:
-        raise RuntimeError(f"Parquet missing columns required by features order: {missing}")
+        raise RuntimeError(f"Parquet missing required columns: {missing}")
 
-    # Keep EXACT order and drop any extra columns not in features
     extra = [c for c in table.column_names if c not in feature_order]
     if extra:
-        # If you ever add debug columns, they MUST also be declared in info.json features.
-        # Otherwise lerobot_replay will fail schema casting.
         print(f"[warn] dropping extra columns not in features: {extra}")
 
     return table.select(feature_order)
+
+
+def default_feature_order(table: pa.Table) -> list[str]:
+    """
+    We keep the existing columns (minus action/task/env_state we rewrite) and force:
+    - action first
+    - observation.task after task_index (if present) else near the end
+    - observation.environment_state near observation.task (right after it)
+    """
+    cols = list(table.column_names)
+
+    # ensure action is present and first
+    if "action" in cols:
+        cols.remove("action")
+    cols = ["action"] + cols
+
+    # place observation.task after task_index if present
+    for name in ["observation.task", "observation.environment_state"]:
+        if name in cols:
+            cols.remove(name)
+
+    insert_at = cols.index("task_index") + 1 if "task_index" in cols else len(cols)
+    cols[insert_at:insert_at] = ["observation.task", "observation.environment_state"]
+
+    return cols
+
+
+# -----------------------------
+# Find all parquet files in a run
+# -----------------------------
+
+def iter_parquets(dataset_root: Path) -> Iterable[Path]:
+    data_dir = dataset_root / "data"
+    return sorted(data_dir.glob("chunk-*/file-*.parquet"))
 
 
 # -----------------------------
@@ -171,79 +339,98 @@ def reorder_table_to_feature_order(table: pa.Table, feature_order: list[str]) ->
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--parquet", required=True, help=".../data/chunk-000/file-000.parquet")
-    ap.add_argument("--job", required=True, help=".../wuerfe/wurf_N.json (must contain target_xy_mm,pos1,pos2,release_progress)")
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--parquet", help=".../<run>/data/chunk-000/file-000.parquet")
+    g.add_argument("--dataset-root", help=".../<run> (will patch all data/chunk-*/file-*.parquet)")
+
+    ap.add_argument("--job", required=True, help=".../wuerfe/wurf_N.json (target_xy_mm,pos1,pos2,release_progress)")
     ap.add_argument("--no-backup", action="store_true")
+    ap.add_argument("--force", action="store_true", help="Rewrite even if it looks already patched.")
     args = ap.parse_args()
 
-    parquet_path = Path(args.parquet).expanduser().resolve()
     job_path = Path(args.job).expanduser().resolve()
-
-    if not parquet_path.exists():
-        raise SystemExit(f"Parquet not found: {parquet_path}")
     if not job_path.exists():
         raise SystemExit(f"Job not found: {job_path}")
-
-    if not args.no_backup:
-        bak = parquet_path.with_suffix(parquet_path.suffix + ".bak")
-        if not bak.exists():
-            shutil.copy2(parquet_path, bak)
-            print(f"[ok] parquet backup written: {bak}")
-
     job = load_job(job_path)
     require_job_fields(job, job_path)
 
-    tx, ty = job["target_xy_mm"]
+    tx, ty = map(float, job["target_xy_mm"])
     pos1 = np.array(job["pos1"], dtype=np.float32)
     pos2 = np.array(job["pos2"], dtype=np.float32)
     rp = np.array([float(job["release_progress"])], dtype=np.float32)
+    params13 = np.concatenate([pos1, pos2, rp], axis=0).astype(np.float32)
 
-    params = np.concatenate([pos1, pos2, rp], axis=0)  # (13,)
-
-    table = pq.read_table(parquet_path)
-
-    # write observation.task + action
-    task_arr = make_task_array(table.num_rows, float(tx), float(ty))
-    action_arr = make_action_params_array(table.num_rows, params)
-
-    table = upsert_column(table, "observation.task", task_arr)
-    table = upsert_column(table, "action", action_arr)
-
-    # preserve parquet metadata if present
-    if table.schema.metadata:
-        table = table.cast(table.schema.with_metadata(table.schema.metadata))
-
-    # enforce consistent (replay-safe) order:
-    # we keep existing base columns in their current order, then ensure task+action are placed as in features.
-    # simplest: define feature order explicitly as the exact final table order you want.
-    base_cols = [c for c in table.column_names if c not in ("observation.task",)]
-    # put observation.task after task_index if it exists, else at end
-    if "task_index" in base_cols:
-        idx = base_cols.index("task_index") + 1
-        feature_order = base_cols[:idx] + ["observation.task"] + base_cols[idx:]
+    if args.parquet:
+        parquets = [Path(args.parquet).expanduser().resolve()]
+        if not parquets[0].exists():
+            raise SystemExit(f"Parquet not found: {parquets[0]}")
+        dataset_root = dataset_root_from_parquet(parquets[0])
     else:
-        feature_order = base_cols + ["observation.task"]
+        dataset_root = Path(args.dataset_root).expanduser().resolve()
+        if not dataset_root.exists():
+            raise SystemExit(f"Dataset root not found: {dataset_root}")
+        parquets = list(iter_parquets(dataset_root))
+        if not parquets:
+            raise SystemExit(f"No parquet files found under: {dataset_root/'data'}")
 
-    # ensure action is first (LeRobot default), if it exists in feature_order move to front
-    if "action" in feature_order:
-        feature_order.remove("action")
-    feature_order = ["action"] + [c for c in feature_order if c != "action"]
+    # Patch each parquet
+    last_table = None
+    for parquet_path in parquets:
+        if not args.no_backup:
+            bak = parquet_path.with_suffix(parquet_path.suffix + ".bak")
+            if not bak.exists():
+                shutil.copy2(parquet_path, bak)
+                print(f"[ok] parquet backup: {bak}")
 
-    # reorder parquet to match features order
-    table = reorder_table_to_feature_order(table, feature_order)
+        table = pq.read_table(parquet_path)
 
-    # patch info.json to match
-    patch_info_json(parquet_path, want_feature_order=feature_order)
+        # quick idempotency check
+        already = (
+            ("observation.task" in table.column_names) and
+            ("observation.environment_state" in table.column_names) and
+            ("action" in table.column_names)
+        )
+        if already and not args.force:
+            # still ensure env_state is correct shape by recomputing (cheap safety)
+            pass
 
-    pq.write_table(table, parquet_path)
+        # write observation.task + action
+        task_arr = make_task_array(table.num_rows, tx, ty)
+        action_arr = make_action_params_array(table.num_rows, params13)
 
-    print("[ok] patched dataset for PARAMETER policy")
-    print(f"     parquet       : {parquet_path}")
-    print(f"     job           : {job_path}")
-    print(f"     target_xy_mm  : [{float(tx)}, {float(ty)}]")
-    print(f"     action params : pos1+pos2+rp (13D)")
-    print(f"     rows          : {table.num_rows}")
-    print(f"     columns       : {table.column_names}")
+        table = upsert_column(table, "observation.task", task_arr)
+        table = upsert_column(table, "action", action_arr)
+
+        # write env_state
+        env_state_arr = compute_env_state(table)
+        table = upsert_column(table, "observation.environment_state", env_state_arr)
+
+        # preserve schema metadata if present
+        if table.schema.metadata:
+            table = table.cast(table.schema.with_metadata(table.schema.metadata))
+
+        # enforce stable column order
+        feature_order = default_feature_order(table)
+        table = enforce_feature_order(table, feature_order)
+
+        pq.write_table(table, parquet_path)
+        print(f"[ok] patched parquet: {parquet_path} (rows={table.num_rows})")
+
+        last_table = table
+
+    assert last_table is not None
+
+    # Patch meta files once (based on the final schema)
+    feature_order = list(last_table.column_names)
+    patch_info_json(dataset_root, feature_order=feature_order)
+    patch_stats_json(dataset_root, last_table, feature_order)
+
+    print("[ok] dataset patched for PARAMETER policy")
+    print(f"     dataset_root   : {dataset_root}")
+    print(f"     parquets       : {len(parquets)}")
+    print(f"     target_xy_mm   : [{tx}, {ty}]")
+    print(f"     action params  : pos1+pos2+rp (13D)")
+    print(f"     feature_order  : {feature_order}")
 
 
 if __name__ == "__main__":

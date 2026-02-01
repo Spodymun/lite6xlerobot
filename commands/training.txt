@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES="" lerobot-train-local --config_path configs/act_env_smoke.yaml --dataset.root records/throws/fs_2026-02-01_16-39-42_job_wurf_1
