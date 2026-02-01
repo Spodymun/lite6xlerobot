@@ -336,8 +336,10 @@ def write_throw_label_training_perfect(
 def run_auto_patch(dataset_root: Path, job_path: Path) -> None:
     """
     Calls tools/patch_actions.py (same folder as this script) to patch:
-      - action[t] = state[t+1]
-      - observation.task = target_xy_mm (from job.json)
+      - action (C60-safe)
+      - action_raw (optional, enabled)
+      - observation.task
+      - meta/info.json
     """
     parquet_path = dataset_root / "data" / "chunk-000" / "file-000.parquet"
     if not parquet_path.exists():
@@ -348,10 +350,16 @@ def run_auto_patch(dataset_root: Path, job_path: Path) -> None:
     if not patch_script.exists():
         raise RuntimeError(f"patch_actions.py not found next to record_throw_and_label.py: {patch_script}")
 
-    cmd = [sys.executable, str(patch_script), "--parquet", str(parquet_path), "--job", str(job_path)]
+    cmd = [
+        sys.executable,
+        str(patch_script),
+        "--parquet", str(parquet_path),
+        "--job", str(job_path),
+    ]
+
     print("[PATCH] Running:", " ".join(cmd))
     subprocess.check_call(cmd)
-    print("[PATCH] Done. (action + observation.task written)")
+    print("[PATCH] Done. Dataset is now trainable & C60-safe.")
 
 
 def main() -> None:
@@ -387,7 +395,7 @@ def main() -> None:
     ap.add_argument("--init-acc", type=float, default=1.0)
 
     # recorder timing
-    ap.add_argument("--episode-time-s", type=float, default=15.0)
+    ap.add_argument("--episode-time-s", type=float, default=12.0)
 
     args = ap.parse_args()
 
@@ -505,7 +513,7 @@ def main() -> None:
         print("[REC] Starting lerobot_record...")
         rec_proc = subprocess.Popen(record_cmd)
 
-        # 5) fixed wait 5s
+        # 5) fixed wait 3s
         time.sleep(5.0)
 
         # 6) throw
@@ -541,11 +549,14 @@ def main() -> None:
             raise RuntimeError(f"lerobot_record exited with code {ret}")
         print("[REC] Done.")
 
-        # 10) auto patch parquet (action + observation.task)
-        if args.x is not None and args.y is not None:
-            run_auto_patch(dataset_root, job_path)
-        else:
-            print("[PATCH] Skipped (no --x/--y provided).")
+        # -----------------------------
+        # Auto patch dataset
+        # -----------------------------
+        print("[PATCH] Auto-patching dataset")
+        run_auto_patch(dataset_root=dataset_root, job_path=job_path)
+
+        print("[DONE] Recording + patch complete.")
+        print(f"[DONE] Dataset ready at: {dataset_root}")
 
     finally:
         try:

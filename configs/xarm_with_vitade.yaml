@@ -1,2 +1,5 @@
 robot:
   type: lerobot_robot_xarm
+  id: xarm_lite6
+  calibration_dir: /home/nelly/src/lite6xlerobot/calibration
+  ip: 10.77.77.200
