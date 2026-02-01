@@ -229,8 +229,8 @@ def pick_ball_topdown(
 
         return None
 
-    arm.open_lite6_gripper(sync=False)
-    time.sleep(0.5)
+    arm.open_lite6_gripper(sync=True)
+    time.sleep(2.5)
 
     rx, ry = mapper.map(ball.x_mm, ball.y_mm)
     rx = rx + float(pick_x_offset_mm)
@@ -257,7 +257,7 @@ def pick_ball_topdown(
         return False, meta
 
     arm.close_lite6_gripper(sync=True)
-    time.sleep(0.60)
+    time.sleep(0.10)
 
     j_lift = ik_joints_for_pose_xyz_rpy_deg(rx, ry, lift_z_mm, FIX_R, FIX_P, FIX_YAW)
     if j_lift is None:
@@ -369,7 +369,7 @@ def main() -> None:
     # mapping + pick
     ap.add_argument("--table-to-robot-yaml", type=str, default="~/src/lite6xlerobot/calibrate/table_to_robot.yaml")
     ap.add_argument("--pick-y-offset-mm", type=float, default=-0.0)
-    ap.add_argument("--pick-x-offset-mm", type=float, default=0.0)
+    ap.add_argument("--pick-x-offset-mm", type=float, default=-2.0)
     ap.add_argument("--hover-z-mm", type=float, default=100.0)
     ap.add_argument("--pick-z-mm", type=float, default=-0.5)
     ap.add_argument("--lift-z-mm", type=float, default=120.0)
@@ -384,9 +384,6 @@ def main() -> None:
     ap.add_argument("--episode-time-s", type=float, default=12.0)
 
     args = ap.parse_args()
-
-    if (args.x is None) ^ (args.y is None):
-        raise RuntimeError("Please provide BOTH --x and --y, or none.")
 
     tools_dir = Path(__file__).resolve().parent
     repo_root = tools_dir.parent
@@ -406,6 +403,25 @@ def main() -> None:
         raise RuntimeError(f"ball_finder.py not found: {ball_script}")
     if not H_path.exists():
         raise RuntimeError(f"H file not found: {H_path}")
+
+    # -------------------------------------------------
+    # TARGET XY handling
+    # Priority:
+    # 1) CLI args (override)
+    # 2) job["target_xy_mm"]
+    # -------------------------------------------------
+    job = read_job_json(job_path)
+    if args.x is not None and args.y is not None:
+        target_x = float(args.x)
+        target_y = float(args.y)
+        job["target_xy_mm"] = [target_x, target_y]
+        write_job_json(job_path, job)
+        print(f"[JOB] Overridden target_xy_mm via CLI: {job['target_xy_mm']}")
+    else:
+        if "target_xy_mm" not in job:
+            raise RuntimeError("Job JSON has no target_xy_mm and no --x/--y provided.")
+        target_x, target_y = job["target_xy_mm"]
+        print(f"[JOB] Using target_xy_mm from job: {job['target_xy_mm']}")
 
     records_root = Path(os.path.expanduser(args.records_root))
     dataset_parent = records_root / args.dataset_name
@@ -468,13 +484,6 @@ def main() -> None:
             raise RuntimeError("go_init_pose failed")
         print("[POSE] INIT reached")
 
-        # 3.5) WRITE target_xy_mm into job (so patch_actions.py can read it)
-        if args.x is not None and args.y is not None:
-            job = read_job_json(job_path)
-            job["target_xy_mm"] = [float(args.x), float(args.y)]
-            write_job_json(job_path, job)
-            print(f"[JOB] Updated {job_path.name}: target_xy_mm={job['target_xy_mm']}")
-
         # 4) START RECORDING
         record_cmd = [
             "python", "-m", "lerobot.scripts.lerobot_record",
@@ -520,8 +529,8 @@ def main() -> None:
             dataset_root,
             run_name=run_name,
             job_id=int(args.job),
-            target_x=float(args.x) if args.x is not None else None,
-            target_y=float(args.y) if args.y is not None else None,
+            target_x=target_x,
+            target_y=target_y,
             job=job_for_label,
             landing_zone=landing_zone,
             success=success,

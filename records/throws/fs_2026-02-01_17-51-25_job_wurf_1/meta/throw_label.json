@@ -1,6 +1,11 @@
 {
-  "schema": "wurf/v1",
-  "ip": "10.77.77.200",
+  "job_id": 1,
+  "ts": "2026-02-01T17:52:08",
+  "run_name": "fs_2026-02-01_17-51-25_job_wurf_1",
+  "target_xy_mm": [
+    70.4,
+    233.2
+  ],
   "pos1": [
     -1.84,
     -1.29397,
@@ -18,14 +23,6 @@
     0.0
   ],
   "release_progress": 0.37,
-  "xyz_tolerance_mm": 20.0,
-  "release_xyz": [
-    42.307167,
-    140.307465,
-    789.673523
-  ],
-  "target_xy_mm": [
-    70.4,
-    233.2
-  ]
+  "landing_zone": "hit",
+  "success": true
 }
