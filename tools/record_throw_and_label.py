@@ -229,8 +229,8 @@ def pick_ball_topdown(
 
         return None
 
-    arm.open_lite6_gripper(sync=True)
-    time.sleep(1.0)
+    arm.open_lite6_gripper(sync=False)
+    time.sleep(0.5)
 
     rx, ry = mapper.map(ball.x_mm, ball.y_mm)
     rx = rx + float(pick_x_offset_mm)
@@ -257,7 +257,7 @@ def pick_ball_topdown(
         return False, meta
 
     arm.close_lite6_gripper(sync=True)
-    time.sleep(0.10)
+    time.sleep(0.60)
 
     j_lift = ik_joints_for_pose_xyz_rpy_deg(rx, ry, lift_z_mm, FIX_R, FIX_P, FIX_YAW)
     if j_lift is None:
@@ -333,33 +333,19 @@ def write_throw_label_training_perfect(
         json.dump(label, f, indent=2)
 
 
-def run_auto_patch(dataset_root: Path, job_path: Path) -> None:
-    """
-    Calls tools/patch_actions.py (same folder as this script) to patch:
-      - action (C60-safe)
-      - action_raw (optional, enabled)
-      - observation.task
-      - meta/info.json
-    """
-    parquet_path = dataset_root / "data" / "chunk-000" / "file-000.parquet"
-    if not parquet_path.exists():
-        raise RuntimeError(f"Expected parquet not found: {parquet_path}")
-
+def run_auto_patch(dataset_root: Path) -> None:
     tools_dir = Path(__file__).resolve().parent
     patch_script = tools_dir / "patch_actions.py"
-    if not patch_script.exists():
-        raise RuntimeError(f"patch_actions.py not found next to record_throw_and_label.py: {patch_script}")
 
     cmd = [
         sys.executable,
         str(patch_script),
         "--dataset-root", str(dataset_root),
-        "--job", str(job_path),
     ]
 
     print("[PATCH] Running:", " ".join(cmd))
     subprocess.check_call(cmd)
-    print("[PATCH] Done. Dataset is now trainable & C60-safe.")
+    print("[PATCH] Done. Dataset is now trainable & replay-safe.")
 
 
 def main() -> None:
@@ -553,7 +539,7 @@ def main() -> None:
         # Auto patch dataset
         # -----------------------------
         print("[PATCH] Auto-patching dataset")
-        run_auto_patch(dataset_root=dataset_root, job_path=job_path)
+        run_auto_patch(dataset_root=dataset_root)
 
         print("[DONE] Recording + patch complete.")
         print(f"[DONE] Dataset ready at: {dataset_root}")
