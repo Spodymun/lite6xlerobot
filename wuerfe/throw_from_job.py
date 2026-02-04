@@ -2,14 +2,11 @@
 """
 wuerfe/throw_from_job.py
 
-Pick & throw:
-1) INIT
-2) Fahre einmal zur Pick-Position erst auf z_safe=60
-3) Senke auf z_pick (aus UI)
-4) Greifer schließen
-5) Wieder hoch auf z_safe
-6) Zurück zu INIT
-7) Wurf: pos1 -> pos2, Release per tgpio sphere trigger
+Reads a job JSON and executes the throw.
+Additionally logs a robust release_xyz_actual by TCP entering the release sphere:
+  dist(TCP_xyz, release_xyz_cmd) <= xyz_tolerance_mm
+
+Writes a result JSON if --result is provided.
 """
 
 import argparse
@@ -31,33 +28,18 @@ INIT_JOINTS_RAD = [
     -1.570796,
 ]
 
-# Speeds / accel
+# Minimal constants (your "always same setup")
 SLOW_SPEED_DEG_S = 25.0
-THROW_SPEED_DEG_S = 120.0
+THROW_SPEED_DEG_S = 500.0
 ACCEL_DEG_S2 = 350.0
 MOVE_TIMEOUT_S = 10.0
 SETTLE_S = 0.2
-
-# Linear (TCP) motion params (tune if needed)
-LINEAR_SPEED_MM_S = 80.0
-LINEAR_ACCEL_MM_S2 = 800.0
 
 COLL_SENS_THROW = 4
 COLL_SENS_RESTORE = 3
 
 OPEN_TO0 = 1
 OPEN_TO1 = 0
-
-# --- PICK TARGET from your screenshot ---
-PICK_X_MM = 80.4
-PICK_Y_MM = -249.9
-PICK_Z_SAFE_MM = 60.0
-PICK_Z_MM = 6.0
-
-PICK_ROLL_DEG = -179.7
-PICK_PITCH_DEG = 0.1
-PICK_YAW_DEG = -0.9
-# --------------------------------------
 
 
 def deg2rad(x: float) -> float:
@@ -95,29 +77,6 @@ def move_j(arm: XArmAPI, joints_rad, speed_deg_s: float, accel_deg_s2: float, wa
         raise RuntimeError(f"move_j failed ({label}) code={code}")
 
 
-def move_l_mm_deg(
-    arm: XArmAPI,
-    x_mm: float, y_mm: float, z_mm: float,
-    roll_deg: float, pitch_deg: float, yaw_deg: float,
-    speed_mm_s: float,
-    accel_mm_s2: float,
-    wait: bool,
-    label: str,
-):
-    # xArm: set_position uses mm and degrees if is_radian=False
-    code = arm.set_position(
-        x=x_mm, y=y_mm, z=z_mm,
-        roll=roll_deg, pitch=pitch_deg, yaw=yaw_deg,
-        speed=speed_mm_s,
-        mvacc=accel_mm_s2,
-        is_radian=False,
-        wait=wait,
-        timeout=MOVE_TIMEOUT_S,
-    )
-    if code != 0:
-        raise RuntimeError(f"move_l failed ({label}) code={code}")
-
-
 def get_tcp_xyz(arm: XArmAPI) -> Optional[list]:
     code, pose = arm.get_position(is_radian=True)
     if code != 0 or pose is None:
@@ -133,6 +92,9 @@ def dist(a, b) -> float:
 
 
 def watch_release_sphere_during_motion(arm: XArmAPI, release_xyz_cmd: list, tol_mm: float, timeout_s: float = 6.0, poll_hz: float = 200.0):
+    """
+    Poll TCP while motion runs; return (release_xyz_actual, min_dist_mm, samples).
+    """
     dt = 1.0 / max(1.0, poll_hz)
     t0 = time.time()
     best = None
@@ -150,8 +112,10 @@ def watch_release_sphere_during_motion(arm: XArmAPI, release_xyz_cmd: list, tol_
             best = d if (best is None or d < best) else best
             if d <= tol_mm and release_actual is None:
                 release_actual = xyz
+                # don't return immediately; but usually it's fine to return right away
                 return release_actual, best, samples
 
+        # stop early if robot stopped moving and we already have best
         try:
             if not bool(arm.get_is_moving()) and best is not None:
                 return release_actual, best, samples
@@ -159,53 +123,6 @@ def watch_release_sphere_during_motion(arm: XArmAPI, release_xyz_cmd: list, tol_
             pass
 
         time.sleep(dt)
-
-
-def do_pick_once(arm: XArmAPI):
-    # Optional: open first so it can grab
-    try:
-        arm.open_lite6_gripper()
-    except Exception:
-        pass
-    time.sleep(0.2)
-
-    # 1) approach at z_safe
-    move_l_mm_deg(
-        arm,
-        PICK_X_MM, PICK_Y_MM, PICK_Z_SAFE_MM,
-        PICK_ROLL_DEG, PICK_PITCH_DEG, PICK_YAW_DEG,
-        LINEAR_SPEED_MM_S, LINEAR_ACCEL_MM_S2,
-        True,
-        "pick_approach_zsafe",
-    )
-    time.sleep(SETTLE_S)
-
-    # 2) down to z_pick
-    move_l_mm_deg(
-        arm,
-        PICK_X_MM, PICK_Y_MM, PICK_Z_MM,
-        PICK_ROLL_DEG, PICK_PITCH_DEG, PICK_YAW_DEG,
-        LINEAR_SPEED_MM_S * 0.5,  # a bit slower when going down
-        LINEAR_ACCEL_MM_S2,
-        True,
-        "pick_down_zpick",
-    )
-    time.sleep(SETTLE_S)
-
-    # 3) close gripper to grip
-    arm.close_lite6_gripper(sync=True)
-    time.sleep(0.2)
-
-    # 4) back up to z_safe
-    move_l_mm_deg(
-        arm,
-        PICK_X_MM, PICK_Y_MM, PICK_Z_SAFE_MM,
-        PICK_ROLL_DEG, PICK_PITCH_DEG, PICK_YAW_DEG,
-        LINEAR_SPEED_MM_S, LINEAR_ACCEL_MM_S2,
-        True,
-        "pick_up_zsafe",
-    )
-    time.sleep(SETTLE_S)
 
 
 def main():
@@ -243,31 +160,29 @@ def main():
     }
 
     try:
-        # A) INIT
-        move_j(arm, INIT_JOINTS_RAD, SLOW_SPEED_DEG_S, ACCEL_DEG_S2, True, "init_A")
+        # Init pose
+        move_j(arm, INIT_JOINTS_RAD, SLOW_SPEED_DEG_S, ACCEL_DEG_S2, True, "init")
         time.sleep(SETTLE_S)
 
-        # B) PICK (einmal hinfahren, runter, greifen, hoch)
-        do_pick_once(arm)
+        # Prep
+        arm.close_lite6_gripper(sync=False)
+        time.sleep(1.0)
 
-        # C) zurück zu INIT
-        move_j(arm, INIT_JOINTS_RAD, SLOW_SPEED_DEG_S, ACCEL_DEG_S2, True, "init_B")
-        time.sleep(SETTLE_S)
-
-        # D) WURF
+        # Go pos1 slow
         move_j(arm, pos1, SLOW_SPEED_DEG_S, ACCEL_DEG_S2, True, "pos1")
         time.sleep(SETTLE_S)
 
+        # Collision sens for throw
         arm.set_collision_sensitivity(COLL_SENS_THROW)
 
-        # Release trigger (digital output when entering sphere)
+        # Arm-side position trigger (the actual release mechanism)
         arm.set_tgpio_digital_with_xyz(0, OPEN_TO0, release_xyz_cmd, tol)
         arm.set_tgpio_digital_with_xyz(1, OPEN_TO1, release_xyz_cmd, tol)
 
         # Throw pos1 -> pos2 non-blocking
         move_j(arm, pos2, THROW_SPEED_DEG_S, ACCEL_DEG_S2, False, "pos2_throw")
 
-        # Watch during motion
+        # Watch during motion using SAME connection
         release_actual, best, samples = watch_release_sphere_during_motion(
             arm, release_xyz_cmd, tol, timeout_s=6.0, poll_hz=200.0
         )
@@ -280,7 +195,9 @@ def main():
         while bool(arm.get_is_moving()) and (time.time() - t0) < MOVE_TIMEOUT_S:
             time.sleep(0.01)
 
+        # Restore
         arm.set_collision_sensitivity(COLL_SENS_RESTORE)
+
         result["ok"] = True
 
     except Exception as e:

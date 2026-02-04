@@ -229,8 +229,8 @@ def pick_ball_topdown(
 
         return None
 
-    arm.open_lite6_gripper(sync=True)
-    time.sleep(2.5)
+    arm.open_lite6_gripper(sync=False)
+    time.sleep(0.1)
 
     rx, ry = mapper.map(ball.x_mm, ball.y_mm)
     rx = rx + float(pick_x_offset_mm)
@@ -256,8 +256,8 @@ def pick_ball_topdown(
         print(f"[ERR] move down failed code={code}")
         return False, meta
 
-    arm.close_lite6_gripper(sync=True)
-    time.sleep(0.10)
+    arm.close_lite6_gripper(sync=False)
+    time.sleep(1.0)
 
     j_lift = ik_joints_for_pose_xyz_rpy_deg(rx, ry, lift_z_mm, FIX_R, FIX_P, FIX_YAW)
     if j_lift is None:
@@ -371,7 +371,7 @@ def main() -> None:
     ap.add_argument("--pick-y-offset-mm", type=float, default=-0.0)
     ap.add_argument("--pick-x-offset-mm", type=float, default=-2.0)
     ap.add_argument("--hover-z-mm", type=float, default=100.0)
-    ap.add_argument("--pick-z-mm", type=float, default=-0.5)
+    ap.add_argument("--pick-z-mm", type=float, default=-2.4)
     ap.add_argument("--lift-z-mm", type=float, default=120.0)
     ap.add_argument("--ik-speed", type=float, default=1.0)
     ap.add_argument("--ik-acc", type=float, default=1.0)
