@@ -3,6 +3,5 @@ python3 cups_yolo.py \
   --H H.npy \
   --yolo_model yolov8n.pt \
   --device cpu \
-  --once \
   --show_red \
   --show_edges

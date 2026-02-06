@@ -371,7 +371,7 @@ def main() -> None:
     ap.add_argument("--pick-y-offset-mm", type=float, default=-0.0)
     ap.add_argument("--pick-x-offset-mm", type=float, default=-2.0)
     ap.add_argument("--hover-z-mm", type=float, default=100.0)
-    ap.add_argument("--pick-z-mm", type=float, default=-2.4)
+    ap.add_argument("--pick-z-mm", type=float, default=-2.3)
     ap.add_argument("--lift-z-mm", type=float, default=120.0)
     ap.add_argument("--ik-speed", type=float, default=1.0)
     ap.add_argument("--ik-acc", type=float, default=1.0)
