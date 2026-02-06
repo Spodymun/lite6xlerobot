@@ -1,0 +1,5 @@
+Arm hat nicht immer geworfen
+-> Funktioniert nur bei Release an einem punkt, da Controller bei Nefehlen acnheinadener überfordert
+-> ALso Controller muss von vorne rein wissen, an welchem Punkt er releasen muss und nciht erst in der ebwegung ein release Commando bekommen
+-> Trifft nicht immer genau den XYz Punmkt daher nicht immer Abwurf
+-> Toleranz Zentrum bauen, sodass der Arm eine "Kugel" hat in der er den release trigger bekommt

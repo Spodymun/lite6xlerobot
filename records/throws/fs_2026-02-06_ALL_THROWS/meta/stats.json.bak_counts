@@ -556,9 +556,5 @@
       70.4000015258789,
       233.1999969482422
     ]
-  },
-  "num_frames": 26979,
-  "num_episodes": 75,
-  "total_frames": 26979,
-  "total_episodes": 75
+  }
 }
