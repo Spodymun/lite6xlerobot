@@ -1,0 +1,248 @@
+Wissenschaftliche Zusammenfassung der durchgeführten Arbeit
+1. Zielsetzung
+
+Ziel dieser Arbeit war es, ein datengetriebenes Lernsystem für einen realen Industrieroboter (xArm Lite6) zu entwickeln, das aus aufgezeichneten Würfen eine Abbildung
+
+(Zielposition)  →  (Wurfparameter)
+(Zielposition)→(Wurfparameter)
+
+lernt.
+Der Fokus lag nicht auf zeitdiskreter Steuerung, sondern auf der Parametrisierung eines vollständigen Bewegungsprimitive (Wurf).
+
+2. Grundlegende Modellierungsentscheidung
+2.1 Keine zeitdiskreten Servo-Actions
+
+Es wurde bewusst darauf verzichtet, zeitdiskrete Servo-Kommandos (Joint-Trajektorien pro Zeitschritt) zu lernen.
+Stattdessen wurde ein parameterbasierter Aktionsraum definiert:
+
+Aktion (13D):
+
+Startpose pos1 (6D Joint-Winkel)
+
+Endpose pos2 (6D Joint-Winkel)
+
+release_progress ∈ [0,1]
+
+Diese Entscheidung wurde getroffen, weil:
+
+Reale Hardware-Nebenwirkungen (Reibung, Luftgreifer, Trägheit) zeitdiskrete Aktionen instabil machen
+
+Der Wurf physikalisch als kontinuierliche Bewegung mit einem einzelnen kritischen Ereignis (Release) modelliert werden kann
+
+Der Aktionsraum dadurch stark reduziert und lernbar wird
+
+➡️ Der Roboter lernt nicht „wie bewege ich mich Schritt für Schritt“, sondern
+„welche Wurfparameter führen zu welchem Ziel“.
+
+3. Datensatzdesign
+3.1 Episodenstruktur
+
+Jeder Wurf wird als eine Episode modelliert.
+
+Länge: ca. 360 Frames
+
+Innerhalb einer Episode:
+
+action konstant
+
+observation.task konstant
+
+Nur Zeitstempel und Frame-Indizes variieren
+
+Das entspricht exakt der Annahme eines parametrischen Bewegungsprimitives.
+
+3.2 Beobachtungsraum
+
+Der Beobachtungsraum wurde explizit strukturiert:
+
+Feature	Dimension	Beschreibung
+observation.state	7	Roboterzustand (Gelenke etc.)
+observation.task	2	Zielposition auf dem Tisch (x,y)
+observation.environment_state	9	concat(state, task)
+
+Die Environment State Representation erlaubt es, das ACT-Modell ohne visuelle Eingaben zu trainieren.
+
+3.3 Datensammlung
+
+Es wurden 75 Würfe aufgezeichnet
+
+25 unterschiedliche Zielpositionen
+
+Pro Ziel 3 erfolgreiche Würfe
+
+Zielabstände ca. 5 cm
+
+➡️ Dadurch entsteht:
+
+Lokale Redundanz (Robustheit)
+
+Globale Abdeckung des Zielraums (Generalisation)
+
+4. Datensatz-Pipeline & Konsolidierung
+4.1 Problemstellung
+
+Die Rohdaten lagen zunächst als 75 separate LeRobot-Datensätze vor (fs_..._job_wurf_X).
+
+LeRobot erwartet jedoch:
+
+einen konsolidierten Dataset-Root
+
+konsistente:
+
+meta/episodes
+
+meta/info.json
+
+meta/stats.json
+
+4.2 Zusammenführung (ALL_THROWS)
+
+Alle Einzelaufnahmen wurden zu einem Dataset zusammengeführt:
+
+records/throws/fs_2026-02-06_ALL_THROWS/
+├── data/chunk-000/file-000.parquet ... file-074.parquet
+├── meta/
+│   ├── episodes/chunk-000/file-000.parquet
+│   ├── info.json
+│   ├── stats.json
+│   └── tasks.parquet
+
+
+Dabei wurden:
+
+episode_index neu durchnummeriert (0–74)
+
+frame_index pro Episode neu gesetzt
+
+index global eindeutig gemacht
+
+episodes.parquet rekonstruiert:
+
+dataset_from_index
+
+dataset_to_index
+
+length
+
+4.3 Konsistenzprüfung (formale Validierung)
+
+Es wurden explizite Datenintegritätsprüfungen durchgeführt:
+
+✔ Spaltenkonsistenz
+
+Alle Parquet-Dateien enthalten exakt:
+
+action
+observation.state
+observation.task
+observation.environment_state
+timestamp
+frame_index
+episode_index
+index
+task_index
+
+✔ Dimensionsprüfung
+
+action: 13
+
+state: 7
+
+task: 2
+
+env: 9
+
+✔ Semantische Konsistenz
+
+observation.environment_state == concat(state, task)
+
+action konstant innerhalb einer Episode
+
+task konstant innerhalb einer Episode
+
+✔ Episoden-Metadaten
+
+total_frames = 26979
+
+num_episodes = 75
+
+dataset_to_index korrekt exklusiv
+
+➡️ Der Datensatz ist formal und semantisch korrekt.
+
+5. Training
+5.1 Modell
+
+ACT (Action Chunking Transformer)
+
+Input: environment_state (9D)
+
+Output: action (13D)
+
+Offline-Imitation Learning
+
+VAE-Latentraum (stochastische Robustheit)
+
+5.2 Trainingseinstellungen
+
+Batchgröße: 8
+
+Schritte: 20 000
+
+Optimizer: AdamW
+
+Learning Rate: 1e-4
+
+Kein Vision Backbone (state-only)
+
+5.3 Ergebnis
+
+Verlust sank von ~8.5 → ~0.1
+
+Stabile Konvergenz
+
+Kein Overfitting-Indikator
+
+Modell lernt glatte Abbildung von Ziel → Wurfparameter
+
+6. Kritischer Bug & Behebung (Normalizer-Checkpoint)
+
+Während des Trainings trat ein systematischer Fehler beim Speichern von Checkpoints auf:
+
+AttributeError: 'Tensor' object has no attribute 'items'
+
+Ursache:
+
+Interner Normalizer speicherte _tensor_stats[key] = Tensor
+
+Erwartet wurde {stat_name: Tensor}
+
+Lösung:
+
+Patch im NormalizationMixin:
+
+Tensor wird automatisch zu { "value": tensor } konvertiert
+
+Dadurch:
+
+Save/Load wieder konsistent
+
+Checkpoints robust
+
+➡️ Der Bug wurde isoliert, reproduziert, verstanden und korrekt gefixt.
+
+7. Wissenschaftliche Einordnung
+
+Diese Arbeit zeigt:
+
+Parametrische Aktionsräume sind für dynamische Robotik-Aufgaben praktikabler als zeitdiskrete Steuerung
+
+Reale Würfe lassen sich effektiv als Bewegungsprimitive mit Release-Ereignis modellieren
+
+Imitation Learning auf Hardware ist stabil, wenn der Aktionsraum korrekt abstrahiert ist
+
+Saubere Datensatz-Semantik ist entscheidend für Lernstabilität
+
+8. Kurzfassung (Abstract-tauglich)
+
+In dieser Arbeit wurde ein datengetriebenes Lernsystem für einen realen Roboterarm entwickelt, das parametrische Wurfbewegungen aus Demonstrationen erlernt. Durch die Abstraktion der Bewegung als kontinuierliches Primitive mit einem einzelnen Release-Parameter konnte der Aktionsraum stark reduziert und robust gelernt werden. Ein konsistenter Offline-Datensatz aus 75 realen Würfen wurde erstellt, validiert und erfolgreich mit einem Action-Chunking-Transformer trainiert. Die Ergebnisse zeigen, dass parametrisches Imitation Learning eine stabile Alternative zur zeitdiskreten Steuerung in dynamischen Robotikaufgaben darstellt.
