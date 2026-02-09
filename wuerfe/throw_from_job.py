@@ -31,7 +31,7 @@ INIT_JOINTS_RAD = [
 # Minimal constants (your "always same setup")
 SLOW_SPEED_DEG_S = 25.0
 THROW_SPEED_DEG_S = 500.0
-ACCEL_DEG_S2 = 350.0
+ACCEL_DEG_S2 = 500.0
 MOVE_TIMEOUT_S = 10.0
 SETTLE_S = 0.2
 

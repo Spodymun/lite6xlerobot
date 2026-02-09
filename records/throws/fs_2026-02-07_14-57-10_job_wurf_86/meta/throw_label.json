@@ -1,11 +1,6 @@
 {
   "job_id": 86,
-  "ts": "2026-02-07T14:57:42",
-  "run_name": "fs_2026-02-07_14-57-10_job_wurf_86",
-  "target_xy_mm": [
-    209.1,
-    696.5
-  ],
+  "landing_zone": "hit",
   "pos1": [
     -1.78733,
     -1.29397,
@@ -23,6 +18,15 @@
     0.0
   ],
   "release_progress": 0.867,
-  "landing_zone": "hit",
-  "success": true
+  "run_name": "fs_2026-02-07_14-57-10_job_wurf_86",
+  "success": true,
+  "target_xy_mm": [
+    239.6,
+    488.2
+  ],
+  "target_xy_mm_raw": [
+    209.1,
+    696.5
+  ],
+  "ts": "2026-02-07T14:57:42"
 }

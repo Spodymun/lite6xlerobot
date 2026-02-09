@@ -3,21 +3,23 @@
 Beer-Pong Cup Detection (YOLO + Aimpoint checks) - CLEAN + NEAREST-TO-ARM BIAS
 
 Neu:
-- Becher-Auswahl bevorzugt Ziele, die näher am Arm liegen (ARM_MM), ohne den visuellen Score zu ignorieren.
+- Optionaler Quadratic Warp in mm-Koordinaten (npz mit cx, cy je (6,))
+- Arg: --warp_npz <path> (aktiviert Warp automatisch)
 - Auswahlkriterium: score - DIST_W * distance_to_arm_mm
 
 Machine-readable output (only when READY):
   CUP_MM x_mm y_mm score yolo_conf
 
 Beispiel:
-  python3 cups_yolo.py --cam 2 --H H.npy --device cpu --once
+  python3 cups_yolo.py --cam 2 --H H.npy --device cpu --once --warp_npz cup_warp.npz
 """
 
 import argparse
-import cv2
-import numpy as np
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
+
+import cv2
+import numpy as np
 
 try:
     from ultralytics import YOLO
@@ -26,8 +28,43 @@ except Exception:
 
 
 # ==============================
+# Optional mm-warp (quadratic)
+# ==============================
+
+def load_cup_warp_npz(path: str) -> dict:
+    """
+    Loads a quadratic 2D warp from npz: cx, cy (each shape (6,))
+    """
+    z = np.load(path)
+    cx = z["cx"].astype(np.float64)
+    cy = z["cy"].astype(np.float64)
+    if cx.shape != (6,) or cy.shape != (6,):
+        raise ValueError(f"warp coeffs must be shape (6,), got cx={cx.shape}, cy={cy.shape}")
+    return {"cx": cx, "cy": cy}
+
+
+def apply_cup_warp(x_mm: float, y_mm: float, warp: Optional[dict]) -> Tuple[float, float]:
+    """
+    Quadratic warp:
+      f = [1, x, y, x^2, x*y, y^2]
+      x' = f @ cx
+      y' = f @ cy
+    """
+    if warp is None:
+        return float(x_mm), float(y_mm)
+
+    x = float(x_mm)
+    y = float(y_mm)
+    f = np.array([1.0, x, y, x * x, x * y, y * y], dtype=np.float64)
+    cx = warp["cx"]
+    cy = warp["cy"]
+    return float(f @ cx), float(f @ cy)
+
+
+# ==============================
 # Data structure
 # ==============================
+
 @dataclass
 class Det:
     rim_px: Tuple[float, float]
@@ -46,6 +83,7 @@ class Det:
 # ==============================
 # Geometry / transforms
 # ==============================
+
 def pix_to_table(H: np.ndarray, x: float, y: float) -> Tuple[float, float]:
     pt = np.array([[[x, y]]], dtype=np.float32)
     out = cv2.perspectiveTransform(pt, H)[0, 0]
@@ -81,6 +119,7 @@ def clip_roi(x0, y0, x1, y1, w, h):
 # ==============================
 # Masks / checks
 # ==============================
+
 def red_mask_hsv(hsv: np.ndarray) -> np.ndarray:
     lower1 = np.array([0, 120, 70])
     upper1 = np.array([10, 255, 255])
@@ -166,6 +205,7 @@ def black_ring_frac(gray: np.ndarray, center: Tuple[float, float], r: int, *, th
 # ==============================
 # ROI aimpoint
 # ==============================
+
 def find_white_centroid_roi(hsv_roi: np.ndarray, *, v_min: int, s_max: int) -> Optional[Tuple[float, float]]:
     lower = np.array([0, 0, v_min], dtype=np.uint8)
     upper = np.array([180, s_max, 255], dtype=np.uint8)
@@ -173,7 +213,6 @@ def find_white_centroid_roi(hsv_roi: np.ndarray, *, v_min: int, s_max: int) -> O
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     wmask = cv2.morphologyEx(wmask, cv2.MORPH_OPEN, k, iterations=1)
     wmask = cv2.morphologyEx(wmask, cv2.MORPH_CLOSE, k, iterations=2)
-
     cnts, _ = cv2.findContours(wmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
         return None
@@ -211,19 +250,18 @@ def pick_best_circle_in_roi(
 ) -> Optional[Tuple[float, float, float, float, float, float]]:
     g = cv2.GaussianBlur(gray_roi, (5, 5), 0)
     circles = cv2.HoughCircles(
-        g, cv2.HOUGH_GRADIENT,
+        g,
+        cv2.HOUGH_GRADIENT,
         dp=1.25,
         minDist=minDist,
         param1=param1,
         param2=param2,
         minRadius=min_r,
-        maxRadius=max_r
+        maxRadius=max_r,
     )
     if circles is None:
         return None
-
     circles = np.round(circles[0, :]).astype(int)
-
     best = None
     best_score = -1e9
 
@@ -231,20 +269,33 @@ def pick_best_circle_in_roi(
         if r <= 0:
             continue
 
-        bfrac = black_ring_frac(gray_roi, (float(cx), float(cy)), int(r),
-                                thick=black_thick, dark_thresh=black_dark_thresh)
+        bfrac = black_ring_frac(
+            gray_roi,
+            (float(cx), float(cy)),
+            int(r),
+            thick=black_thick,
+            dark_thresh=black_dark_thresh,
+        )
         if bfrac < black_min:
             continue
 
-        rratio = red_ratio_in_annulus(hsv_roi, (float(cx), float(cy)),
-                                      r_in=max(1, int(r + ann_in)),
-                                      r_out=max(2, int(r + ann_out)))
+        rratio = red_ratio_in_annulus(
+            hsv_roi,
+            (float(cx), float(cy)),
+            r_in=max(1, int(r + ann_in)),
+            r_out=max(2, int(r + ann_out)),
+        )
         if rratio < red_ring_min:
             continue
 
         inner_r = max(2, int(r * inner_r_frac))
-        w_inner = white_ratio_in_disk(hsv_roi, (float(cx), float(cy)), inner_r,
-                                      v_min=white_v_min, s_max=white_s_max)
+        w_inner = white_ratio_in_disk(
+            hsv_roi,
+            (float(cx), float(cy)),
+            inner_r,
+            v_min=white_v_min,
+            s_max=white_s_max,
+        )
         if w_inner < white_inner_min:
             continue
 
@@ -263,6 +314,7 @@ def pick_best_circle_in_roi(
 # ==============================
 # YOLO helper
 # ==============================
+
 def yolo_boxes(model, frame_bgr: np.ndarray, *, conf: float, iou: float, cls: Optional[int], device: str):
     res = model.predict(frame_bgr, conf=conf, iou=iou, verbose=False, device=device)[0]
     out = []
@@ -271,7 +323,6 @@ def yolo_boxes(model, frame_bgr: np.ndarray, *, conf: float, iou: float, cls: Op
     xyxy = res.boxes.xyxy.cpu().numpy()
     confs = res.boxes.conf.cpu().numpy()
     clss = res.boxes.cls.cpu().numpy().astype(int)
-
     for (x0, y0, x1, y1), c, k in zip(xyxy, confs, clss):
         if cls is not None and k != cls:
             continue
@@ -282,6 +333,7 @@ def yolo_boxes(model, frame_bgr: np.ndarray, *, conf: float, iou: float, cls: Op
 # ==============================
 # Stability helper
 # ==============================
+
 def mm_dist(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     return float(np.hypot(a[0] - b[0], a[1] - b[1]))
 
@@ -292,11 +344,13 @@ def main():
     ap.add_argument("--cam", type=int, default=0)
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=480)
-
-    ap.add_argument("--H", type=str, default="H.npy", help="Fixed homography pixel->table(mm)")
+    ap.add_argument("--H", type=str, default="H_fixed.npy", help="Fixed homography pixel->table(mm)")
     ap.add_argument("--once", action="store_true", help="Exit after first READY CUP_MM output")
 
-    # Arm-bias: du kannst das grob setzen, muss nicht mm-genau sein
+    # Optional warp
+    ap.add_argument("--warp_npz", type=str, default="", help="Optional mm-warp npz (cx,cy coeffs). If set, warp is applied.")
+
+    # Arm-bias
     ap.add_argument("--arm_x", type=float, default=360.0, help="Arm reference X in table mm")
     ap.add_argument("--arm_y", type=float, default=1300.0, help="Arm reference Y in table mm")
     ap.add_argument("--dist_w", type=float, default=0.002, help="Distance penalty weight (score per mm)")
@@ -310,7 +364,7 @@ def main():
     ap.add_argument("--device", type=str, default="cpu")
 
     # mm ROI
-    ap.add_argument("--y_offset", type=float, default=50.0)
+    ap.add_argument("--y_offset", type=float, default=0.0)
     ap.add_argument("--xmin", type=float, default=0.0)
     ap.add_argument("--xmax", type=float, default=800.0)
     ap.add_argument("--ymin", type=float, default=0.0)
@@ -328,11 +382,9 @@ def main():
     ap.add_argument("--red_ring_min", type=float, default=0.12)
     ap.add_argument("--ann_in", type=int, default=2)
     ap.add_argument("--ann_out", type=int, default=14)
-
     ap.add_argument("--black_min", type=float, default=0.20)
     ap.add_argument("--black_dark_thresh", type=int, default=100)
     ap.add_argument("--black_thick", type=int, default=2)
-
     ap.add_argument("--inner_r_frac", type=float, default=0.50)
     ap.add_argument("--white_inner_min", type=float, default=0.40)
     ap.add_argument("--red_inner_max", type=float, default=0.15)
@@ -359,6 +411,10 @@ def main():
     if H.shape != (3, 3):
         raise RuntimeError(f"H must be 3x3, got {H.shape}")
 
+    warp = None
+    if args.warp_npz.strip():
+        warp = load_cup_warp_npz(args.warp_npz.strip())
+
     cap = cv2.VideoCapture(args.cam, cv2.CAP_V4L2)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
@@ -383,7 +439,15 @@ def main():
         edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 40, 130)
         redmask = red_mask_hsv(hsv)
 
-        boxes = yolo_boxes(model, frame, conf=args.yolo_conf, iou=args.yolo_iou, cls=args.yolo_cls, device=args.device)
+        boxes = yolo_boxes(
+            model,
+            frame,
+            conf=args.yolo_conf,
+            iou=args.yolo_iou,
+            cls=args.yolo_cls,
+            device=args.device,
+        )
+
         dets: List[Det] = []
 
         for (x0, y0, x1, y1, bconf, cls_id) in boxes:
@@ -403,7 +467,8 @@ def main():
                 max_r = min(args.h_max_r, min_r + 6)
 
             best_circle = pick_best_circle_in_roi(
-                roi_gray, roi_hsv,
+                roi_gray,
+                roi_hsv,
                 minDist=args.h_minDist,
                 param1=args.h_param1,
                 param2=args.h_param2,
@@ -437,8 +502,13 @@ def main():
                 r_full = float(max(12, est_r))
 
                 inner_r = max(2, int(r_full * args.inner_r_frac))
-                w_inner = white_ratio_in_disk(hsv, (cx_full, cy_full), inner_r,
-                                              v_min=args.white_v_min, s_max=args.white_s_max)
+                w_inner = white_ratio_in_disk(
+                    hsv,
+                    (cx_full, cy_full),
+                    inner_r,
+                    v_min=args.white_v_min,
+                    s_max=args.white_s_max,
+                )
                 if w_inner < args.white_inner_min:
                     continue
 
@@ -446,47 +516,63 @@ def main():
                 if r_inner > args.red_inner_max:
                     continue
 
-                bfrac = black_ring_frac(gray, (cx_full, cy_full), int(r_full),
-                                        thick=args.black_thick, dark_thresh=args.black_dark_thresh)
+                bfrac = black_ring_frac(
+                    gray,
+                    (cx_full, cy_full),
+                    int(r_full),
+                    thick=args.black_thick,
+                    dark_thresh=args.black_dark_thresh,
+                )
                 if bfrac < args.black_min:
                     continue
 
-                rratio = red_ratio_in_annulus(hsv, (cx_full, cy_full),
-                                              r_in=max(1, int(r_full + args.ann_in)),
-                                              r_out=max(2, int(r_full + args.ann_out)))
+                rratio = red_ratio_in_annulus(
+                    hsv,
+                    (cx_full, cy_full),
+                    r_in=max(1, int(r_full + args.ann_in)),
+                    r_out=max(2, int(r_full + args.ann_out)),
+                )
                 if rratio < args.red_ring_min:
                     continue
 
+            # ---- px -> mm (homography) ----
             x_mm, y_mm = pix_to_table(H, float(cx_full), float(cy_full))
             y_mm += args.y_offset
+
+            # ---- optional warp in mm space ----
+            x_mm, y_mm = apply_cup_warp(x_mm, y_mm, warp)
+
             if not in_mm_roi(x_mm, y_mm, args.xmin, args.xmax, args.ymin, args.ymax):
                 continue
 
+            # diameter check (still based on homography estimate)
             diam_mm = estimate_diameter_mm_from_homography(H, float(cx_full), float(cy_full), float(r_full))
             if diam_mm > args.max_diam_mm:
                 continue
 
             score = (
-                (2.2 * float(w_inner)) +
-                (2.0 * float(bfrac)) +
-                (1.8 * float(rratio)) +
-                (0.01 * float(r_full)) -
-                (0.002 * float(diam_mm))
+                (2.2 * float(w_inner))
+                + (2.0 * float(bfrac))
+                + (1.8 * float(rratio))
+                + (0.01 * float(r_full))
+                - (0.002 * float(diam_mm))
             )
 
-            dets.append(Det(
-                rim_px=(float(cx_full), float(cy_full)),
-                r_px=float(r_full),
-                x_mm=float(x_mm),
-                y_mm=float(y_mm),
-                diam_mm=float(diam_mm),
-                red_ratio=float(rratio),
-                black_frac=float(bfrac),
-                white_inner=float(w_inner),
-                score=float(score),
-                yolo_conf=float(bconf),
-                box_xyxy=(x0, y0, x1, y1),
-            ))
+            dets.append(
+                Det(
+                    rim_px=(float(cx_full), float(cy_full)),
+                    r_px=float(r_full),
+                    x_mm=float(x_mm),
+                    y_mm=float(y_mm),
+                    diam_mm=float(diam_mm),
+                    red_ratio=float(rratio),
+                    black_frac=float(bfrac),
+                    white_inner=float(w_inner),
+                    score=float(score),
+                    yolo_conf=float(bconf),
+                    box_xyxy=(x0, y0, x1, y1),
+                )
+            )
 
         # ---------------------------------------------------------
         # Pick best candidate with NEAREST-TO-ARM bias:
@@ -524,8 +610,15 @@ def main():
         # draw YOLO boxes
         for (x0, y0, x1, y1, bconf, cls_id) in boxes:
             cv2.rectangle(vis, (x0, y0), (x1, y1), (255, 180, 0), 2)
-            cv2.putText(vis, f"yolo {bconf:.2f}", (x0, max(0, y0 - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 180, 0), 2)
+            cv2.putText(
+                vis,
+                f"yolo {bconf:.2f}",
+                (x0, max(0, y0 - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 180, 0),
+                2,
+            )
 
         # draw dets
         for d in dets:
@@ -535,22 +628,32 @@ def main():
             cv2.circle(vis, (int(cx), int(cy)), 4, (0, 255, 255), -1)
             cv2.putText(
                 vis,
-                f"S{d.score:.2f}  W{d.white_inner:.2f} R{d.red_ratio:.2f} B{d.black_frac:.2f}",
+                f"S{d.score:.2f} W{d.white_inner:.2f} R{d.red_ratio:.2f} B{d.black_frac:.2f}",
                 (int(cx) - 85, int(cy) + 18),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 2
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (255, 255, 255),
+                2,
             )
 
+        warp_txt = "warp=ON" if warp is not None else "warp=OFF"
         cv2.putText(
             vis,
-            f"ARM=({ARM_MM[0]:.0f},{ARM_MM[1]:.0f})  dist_w={DIST_W:.4f}",
+            f"ARM=({ARM_MM[0]:.0f},{ARM_MM[1]:.0f}) dist_w={DIST_W:.4f} {warp_txt}",
             (10, 20),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            2,
         )
         cv2.putText(
             vis,
-            f"ROI x[{args.xmin:.0f}..{args.xmax:.0f}] y[{args.ymin:.0f}..{args.ymax:.0f}]  maxDiam={args.max_diam_mm:.0f}mm",
+            f"ROI x[{args.xmin:.0f}..{args.xmax:.0f}] y[{args.ymin:.0f}..{args.ymax:.0f}] maxDiam={args.max_diam_mm:.0f}mm",
             (10, 42),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            2,
         )
 
         if best_det is not None:
@@ -559,23 +662,32 @@ def main():
             if ready:
                 cv2.putText(
                     vis,
-                    f"READY streak={best_streak}  THROW ({best_det.x_mm:.1f},{best_det.y_mm:.1f})",
+                    f"READY streak={best_streak} THROW ({best_det.x_mm:.1f},{best_det.y_mm:.1f})",
                     (10, 65),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 0, 255),
+                    2,
                 )
             else:
                 cv2.putText(
                     vis,
-                    f"NOT READY streak={best_streak}/{args.ready_frames}  bestScore={best_det.score:.2f}/{args.ready_score:.2f}",
+                    f"NOT READY streak={best_streak}/{args.ready_frames} bestScore={best_det.score:.2f}/{args.ready_score:.2f}",
                     (10, 65),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    2,
                 )
         else:
             cv2.putText(
                 vis,
                 "NO DETECTIONS",
                 (10, 65),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2,
             )
 
         cv2.imshow("cups", vis)

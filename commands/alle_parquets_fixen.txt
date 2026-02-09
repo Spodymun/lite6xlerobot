@@ -1,0 +1,16 @@
+python3 - <<'PY'
+from pathlib import Path
+import subprocess
+
+runs_root = Path("records/throws")
+runs = sorted([p for p in runs_root.glob("fs_*_job_wurf_*") if p.is_dir()])
+
+for r in runs:
+    print("\n[PATCH]", r)
+    subprocess.run(
+        ["python3", "tools/patch_actions.py", "--dataset-root", str(r)],
+        check=True
+    )
+
+print("\nDONE")
+PY

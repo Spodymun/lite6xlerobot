@@ -1,0 +1,19 @@
+{
+  "runs_root": "/home/nelly/src/lite6xlerobot/records/throws",
+  "glob": "fs_*_job_wurf_*",
+  "kept": 123,
+  "skipped": 0,
+  "total_frames": 44244,
+  "total_episodes": 123,
+  "feature_order": [
+    "action",
+    "observation.state",
+    "timestamp",
+    "frame_index",
+    "episode_index",
+    "index",
+    "task_index",
+    "observation.task",
+    "observation.environment_state"
+  ]
+}

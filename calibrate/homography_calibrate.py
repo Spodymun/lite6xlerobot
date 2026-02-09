@@ -72,6 +72,8 @@ def compute_homography_from_markers(frame_bgr: np.ndarray, detector):
         center = marker_center(c)
         pixel_pts.append(center)
         table_pts.append([tx, ty])
+        print("Marker", mid)
+        print(c)
 
     if len(pixel_pts) < 4:
         return None, corners, ids, "Need >=4 known markers"
