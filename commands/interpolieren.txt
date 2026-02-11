@@ -1,0 +1,6 @@
+python3 tools/run_policy_throw.py \
+  --ckpt outputs/train/2026-02-08/12-49-21_gym_manipulator_act/checkpoints/010000/pretrained_model \
+  --root records/throws/fs_2026-02-08_ALL_THROWS_FIXED \
+  --target 200 300 \
+  --dry_run \
+  --no_fk
