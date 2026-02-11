@@ -24,13 +24,13 @@ import numpy as np
 # =========================
 MARKER_TABLE_MM = {
     10: (0.0,    0.0),
-    11: (720.0,  0.0),
-    12: (0.0,  500.0),
-    13: (0.0, 1100.0),
-    14: (720.0, 500.0),
-    15: (720.0,1100.0),
-    16: (360.0, 250.0),
-    17: (360.0, 800.0),
+    11: (0.0,  720.0),
+    12: (500.0,  0.0),
+    13: (1100.0, 0.0),
+    14: (500.0, 720.0),
+    15: (1100.0, 720.0),
+    16: (250.0, 360.0),
+    17: (800.0, 360.0),
 }
 
 # Require the 4 corner markers to be visible for a valid H
@@ -72,8 +72,6 @@ def compute_homography_from_markers(frame_bgr: np.ndarray, detector):
         center = marker_center(c)
         pixel_pts.append(center)
         table_pts.append([tx, ty])
-        print("Marker", mid)
-        print(c)
 
     if len(pixel_pts) < 4:
         return None, corners, ids, "Need >=4 known markers"
