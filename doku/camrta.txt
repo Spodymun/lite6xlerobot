@@ -1,3 +1,0 @@
-/home/nelly/src/lerobot/src/lerobot/scripts/lerobot_find_cameras.py
-
-183 den Inhalt der Klammer entfernen

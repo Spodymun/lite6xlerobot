@@ -5,14 +5,17 @@ tools/record_throw_and_label.py
 Ablauf:
 1) Ball finden (koordinaten/ball_finder.py -> "BALL_MM x y conf")
 2) Ball aufnehmen (Top-Down Pick, IK, fixed RPY)
-3) INIT Pose anfahren (fest im Code)
-4) LeRobot Recording starten
-5) 5 Sekunden warten
-6) wuerfe/throw_from_job.py mit --job ausführen + --result /tmp/throw_result.json
-7) Landing-Zone per 1-Taste labeln (q/w/e/a/s/d/y/x/c, s=hit)
-8) meta/throw_label.json schreiben (target + pos1/pos2 + release_progress + landing_zone + success + job_id + ts + run_name)
-9) Warten bis LeRobot fertig ist (rec_proc.wait())
-10) Danach automatisch patchen:
+3) STILL Pose anfahren (fest im Code)  [NEU]
+   - Greifer 1 Sekunde öffnen
+   - Greifer schließen
+4) INIT Pose anfahren (fest im Code)
+5) LeRobot Recording starten
+6) 5 Sekunden warten
+7) wuerfe/throw_from_job.py mit --job ausführen + --result /tmp/throw_result.json
+8) Landing-Zone per 1-Taste labeln (q/w/e/a/s/d/y/x/c, s=hit)
+9) meta/throw_label.json schreiben (target + pos1/pos2 + release_progress + landing_zone + success + job_id + ts + run_name)
+10) Warten bis LeRobot fertig ist (rec_proc.wait())
+11) Danach automatisch patchen:
     - action[t] = state[t+1]
     - observation.task = target_xy_mm (aus job.json)
 """
@@ -50,6 +53,19 @@ INIT_JOINTS_RAD = [
      0.000000,
      0.474205,
     -1.570796,
+]
+
+# -----------------------------
+# STILL Pose (NEU)
+# -90, 45, 135, 0, -90, -90   (deg)
+# -----------------------------
+STILL_JOINTS_RAD = [
+    -1.570796,  # -90
+     0.785398,  # 45
+     2.356194,  # 135
+     0.000000,  # 0
+    -1.570796,  # -90
+    -1.570796,  # -90
 ]
 
 # fixed RPY for top-down pick
@@ -194,6 +210,22 @@ def go_init_pose(arm: XArmAPI, *, speed: float, acc: float, wait: bool = True) -
     return True
 
 
+def go_still_pose(arm: XArmAPI, *, speed: float, acc: float, wait: bool = True) -> bool:
+    code = arm.set_servo_angle(
+        angle=STILL_JOINTS_RAD,
+        speed=speed,
+        mvacc=acc,
+        is_radian=True,
+        wait=wait,
+    )
+    if code != 0:
+        arm.clean_error()
+        arm.clean_warn()
+        arm.set_state(0)
+        return False
+    return True
+
+
 def pick_ball_topdown(
     arm: XArmAPI,
     mapper: TableToRobot,
@@ -229,8 +261,8 @@ def pick_ball_topdown(
 
         return None
 
-    arm.open_lite6_gripper(sync=False)
-    time.sleep(0.1)
+    arm.open_lite6_gripper(sync=True)
+    time.sleep(0.2)
 
     rx, ry = mapper.map(ball.x_mm, ball.y_mm)
     rx = rx + float(pick_x_offset_mm)
@@ -256,8 +288,11 @@ def pick_ball_topdown(
         print(f"[ERR] move down failed code={code}")
         return False, meta
 
-    arm.close_lite6_gripper(sync=False)
-    time.sleep(1.0)
+    time.sleep(0.25)
+
+    arm.close_lite6_gripper(sync=True)
+
+    time.sleep(0.3)
 
     j_lift = ik_joints_for_pose_xyz_rpy_deg(rx, ry, lift_z_mm, FIX_R, FIX_P, FIX_YAW)
     if j_lift is None:
@@ -360,7 +395,7 @@ def main() -> None:
     ap.add_argument("--config-path", type=str, default="~/src/lite6xlerobot/configs/xarm_with_vitade.yaml")
 
     # detector (ball_finder)
-    ap.add_argument("--cam", type=int, default=0)
+    ap.add_argument("--cam", type=int, default=3)
     ap.add_argument("--H", type=str, default="H.npy")
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--ball-timeout-s", type=float, default=15.0)
@@ -371,12 +406,12 @@ def main() -> None:
     ap.add_argument("--pick-y-offset-mm", type=float, default=0.0)
     ap.add_argument("--pick-x-offset-mm", type=float, default=0.0)
     ap.add_argument("--hover-z-mm", type=float, default=100.0)
-    ap.add_argument("--pick-z-mm", type=float, default=-2.1)
+    ap.add_argument("--pick-z-mm", type=float, default=-1.5)
     ap.add_argument("--lift-z-mm", type=float, default=120.0)
     ap.add_argument("--ik-speed", type=float, default=1.0)
     ap.add_argument("--ik-acc", type=float, default=1.0)
 
-    # init pose motion
+    # init pose motion (reused for STILL + INIT)
     ap.add_argument("--init-speed", type=float, default=1.0)
     ap.add_argument("--init-acc", type=float, default=1.0)
 
@@ -478,13 +513,28 @@ def main() -> None:
             raise RuntimeError("Pick failed")
         print("[PICK] OK")
 
-        # 3) GO INIT POSE
+        # 3) GO STILL POSE (NEU)
+        print("[POSE] go_still_pose...")
+        if not go_still_pose(arm, speed=args.init_speed, acc=args.init_acc, wait=True):
+            raise RuntimeError("go_still_pose failed")
+        print("[POSE] STILL reached")
+
+        # STILL: gripper kurz auf/zu (MUSS blocking sein)
+        print("[GRIP] open (still)...")
+        arm.open_lite6_gripper(sync=True)
+        time.sleep(3.0)
+
+        print("[GRIP] close (still)...")
+        arm.close_lite6_gripper(sync=True)
+        time.sleep(0.3)
+
+        # 4) GO INIT POSE
         print("[POSE] go_init_pose...")
         if not go_init_pose(arm, speed=args.init_speed, acc=args.init_acc, wait=True):
             raise RuntimeError("go_init_pose failed")
         print("[POSE] INIT reached")
 
-        # 4) START RECORDING
+        # 5) START RECORDING
         record_cmd = [
             "python", "-m", "lerobot.scripts.lerobot_record",
             "--config_path", os.path.expanduser(args.config_path),
@@ -508,22 +558,22 @@ def main() -> None:
         print("[REC] Starting lerobot_record...")
         rec_proc = subprocess.Popen(record_cmd)
 
-        # 5) fixed wait 3s
+        # 6) fixed wait 5s
         time.sleep(5.0)
 
-        # 6) throw
+        # 7) throw
         print(f"[THROW] Running throw_from_job on {job_path.name} ...")
         subprocess.check_call([sys.executable, str(throw_script), "--job", str(job_path), "--result", str(result_path)])
         print("[THROW] Done.")
 
-        # 7) landing_zone per key
+        # 8) landing_zone per key
         print("Landing-Zone: q w e / a s d / y x c   (s = HIT)")
         k = read_single_key()
         landing_zone = ZONE_MAP[k]
         success = (k == "s")
         print(f"[LABEL] landing_zone={landing_zone} success={success}")
 
-        # 8) write label
+        # 9) write label
         job_for_label = read_job_json(job_path)
         write_throw_label_training_perfect(
             dataset_root,
@@ -537,16 +587,14 @@ def main() -> None:
         )
         print("[LABEL] Wrote meta/throw_label.json")
 
-        # 9) wait for recorder
+        # 10) wait for recorder
         print("[REC] Waiting until lerobot_record finishes...")
         ret = rec_proc.wait()
         if ret != 0:
             raise RuntimeError(f"lerobot_record exited with code {ret}")
         print("[REC] Done.")
 
-        # -----------------------------
-        # Auto patch dataset
-        # -----------------------------
+        # 11) Auto patch dataset
         print("[PATCH] Auto-patching dataset")
         run_auto_patch(dataset_root=dataset_root)
 

@@ -111,7 +111,7 @@ v4l2-ctl -d /dev/video3 -c power_line_frequency=1
 (1 = 50 Hz, 2 = 60 Hz)
 ✅ Schritt 2 – Auto Exposure deaktivieren
 
-v4l2-ctl -d /dev/video3 -c auto_exposure=1
+v4l2-ctl -d /dev/video3 -c auto_exposure=3
 
 1 = Manual Mode
 
@@ -143,6 +143,4 @@ Belichtung fixierst
 
 Dynamic Framerate ausmachst
 
-→ Bild wird stabil.
-
-v4l2-ctl -d /dev/video3 -c auto_exposure=1
+→ Bild wird stabil
