@@ -17,12 +17,12 @@
     0.230383,
     0.0
   ],
-  "release_progress": 0.86,
-  "xyz_tolerance_mm": 5.0,
+  "release_progress": 0.864,
+  "xyz_tolerance_mm": 3.0,
   "release_xyz": [
-    -257.141205,
-    -482.763702,
-    390.568481
+    -257.970886,
+    -484.280579,
+    384.065216
   ],
   "target_xy_mm": [
     500.0,

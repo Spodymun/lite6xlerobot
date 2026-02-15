@@ -139,7 +139,7 @@ def main():
     pos1 = job.get("pos1", None)
     pos2 = job.get("pos2", None)
     release_xyz_cmd = safe_xyz(job.get("release_xyz", None))
-    tol = float(job.get("xyz_tolerance_mm", 5.0))
+    tol = float(job.get("xyz_tolerance_mm", 3.5))
 
     if pos1 is None or pos2 is None:
         raise RuntimeError("Job json must contain pos1 and pos2 (joint rad lists).")

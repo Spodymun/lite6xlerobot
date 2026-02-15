@@ -2,7 +2,6 @@ python3 cups_yolo.py \
   --cam 0 \
   --H H.npy \
   --device cpu \
-  --once \
   --show_red \
   --yolo_conf 0.10 \
   --roi_pad 0.05 \

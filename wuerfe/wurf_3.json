@@ -18,7 +18,7 @@
     0.0
   ],
   "release_progress": 0.877,
-  "xyz_tolerance_mm": 5.0,
+  "xyz_tolerance_mm": 3.0,
   "release_xyz": [
     199.139267,
     -515.22821,

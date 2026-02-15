@@ -395,7 +395,7 @@ def main() -> None:
     ap.add_argument("--config-path", type=str, default="~/src/lite6xlerobot/configs/xarm_with_vitade.yaml")
 
     # detector (ball_finder)
-    ap.add_argument("--cam", type=int, default=3)
+    ap.add_argument("--cam", type=int, default=0)
     ap.add_argument("--H", type=str, default="H.npy")
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--ball-timeout-s", type=float, default=15.0)
