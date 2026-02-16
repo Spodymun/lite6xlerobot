@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 2
+names: ['ball', 'cup']
+
+roboflow:
+  workspace: ball-wibes
+  project: ball_and_cups
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/ball-wibes/ball_and_cups/dataset/1
