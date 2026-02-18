@@ -1,1 +1,12 @@
-CUDA_VISIBLE_DEVICES="" lerobot-train-local --config_path configs/act_env_smoke.yaml --dataset.root records/throws/fs_2026-02-01_16-39-42_job_wurf_1
+cd ~/src/lite6xlerobot
+export PYTHONPATH="$PWD:${PYTHONPATH}"
+export CUDA_VISIBLE_DEVICES=""
+
+lerobot-train \
+  --config_path configs/act_env_smoke.yaml \
+  --dataset.root records/throws/fs_ALL_80_THROWS_TASKINENV \
+  --steps 200000 \
+  --log_freq 50 \
+  --save_checkpoint true \
+  --save_freq 5000
+

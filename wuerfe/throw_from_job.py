@@ -129,6 +129,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--job", required=True, help="Path to job json (e.g. wuerfe/wurf_1.json)")
     ap.add_argument("--result", default=None, help="Write result json here (optional)")
+    ap.add_argument("--no-init", action="store_true", help="Skip init pose and prep (already at INIT)")
     args = ap.parse_args()
 
     job_path = Path(args.job)
@@ -139,7 +140,7 @@ def main():
     pos1 = job.get("pos1", None)
     pos2 = job.get("pos2", None)
     release_xyz_cmd = safe_xyz(job.get("release_xyz", None))
-    tol = float(job.get("xyz_tolerance_mm", 3.5))
+    tol = float(job.get("xyz_tolerance_mm", 0.0))
 
     if pos1 is None or pos2 is None:
         raise RuntimeError("Job json must contain pos1 and pos2 (joint rad lists).")
@@ -160,14 +161,15 @@ def main():
     }
 
     try:
-        # Init pose
-        move_j(arm, INIT_JOINTS_RAD, SLOW_SPEED_DEG_S, ACCEL_DEG_S2, True, "init")
-        time.sleep(SETTLE_S)
+        # Init pose (skip with --no-init if already at INIT)
+        if not args.no_init:
+            move_j(arm, INIT_JOINTS_RAD, SLOW_SPEED_DEG_S, ACCEL_DEG_S2, True, "init")
+            time.sleep(SETTLE_S)
 
-        # Prep
-        time.sleep(1.0)
-        arm.close_lite6_gripper(sync=True)
-        time.sleep(1.0)
+            # Prep
+            time.sleep(1.0)
+            arm.close_lite6_gripper(sync=True)
+            time.sleep(1.0)
 
         # Go pos1 slow
         move_j(arm, pos1, SLOW_SPEED_DEG_S, ACCEL_DEG_S2, True, "pos1")

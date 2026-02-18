@@ -8,9 +8,11 @@ env:
   fps: 30
   max_parallel_tasks: 1
   name: real_robot
+
   features:
     env:    {type: ENV,    shape: [9]}
     action: {type: ACTION, shape: [13]}
+
   features_map:
     env:
       - observation.environment_state
@@ -22,15 +24,17 @@ policy:
   device: cpu
   push_to_hub: false
   use_amp: false
+
   input_features:
     env: {type: ENV, shape: [9]}
+
   output_features:
     action: {type: ACTION, shape: [13]}
+
   normalization_mapping:
     ENV: IDENTITY
     ACTION: IDENTITY
 
-# ---- TRAIN (statt smoke) ----
 steps: 200000
 batch_size: 16
 num_workers: 0
@@ -38,7 +42,6 @@ log_freq: 50
 save_checkpoint: true
 save_freq: 5000
 
-# eval regelmäßig, damit du Overfit/Regression früh siehst
 eval_freq: 99999999999
 eval:
   batch_size: 16
