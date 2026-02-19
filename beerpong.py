@@ -31,7 +31,7 @@ from lerobot.configs.policies import PreTrainedConfig
 
 from xarm.wrapper import XArmAPI
 
-from lite6xlerobot.calibrate.cup_warp import load_cup_warp_npz, apply_cup_warp
+from calibrate.cup_warp import load_cup_warp_npz, apply_cup_warp
 
 # ============================================================================
 # CONSTANTS

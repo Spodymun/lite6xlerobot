@@ -18,8 +18,9 @@ from ultralytics import YOLO
 
 # Optional warp (measured mm -> true mm)
 # Requires cup_warp.py in same folder (or PYTHONPATH)
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "calibrate"))
 from cup_warp import load_cup_warp_npz, apply_cup_warp
-
 
 def pixel_to_table_xy(pixel_xy: np.ndarray, H: np.ndarray) -> np.ndarray:
     """
@@ -36,7 +37,8 @@ def main():
     ap = argparse.ArgumentParser(description="Cup detection via YOLO (with optional cup warp)")
     ap.add_argument("--cam", type=int, default=0, help="OpenCV camera index (0/1/2...)")
 
-    ap.add_argument("--H", type=str, default="H.npy",
+    ap.add_argument("--H", type=str,
+                    default=str(Path(__file__).resolve().parent.parent / "calibrate" / "H.npy"),
                     help="Path to fixed homography (pixel->table mm)")
     ap.add_argument("--once", action="store_true",
                     help="Exit after first valid CUP_MM output")
