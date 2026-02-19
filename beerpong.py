@@ -31,10 +31,7 @@ from lerobot.configs.policies import PreTrainedConfig
 
 from xarm.wrapper import XArmAPI
 
-# cup warp utilities (optional)
-sys.path.insert(0, str(Path(__file__).resolve().parent / "koordinaten"))
-from cup_warp import load_cup_warp_npz, apply_cup_warp
-
+from lite6xlerobot.calibrate.cup_warp import load_cup_warp_npz, apply_cup_warp
 
 # ============================================================================
 # CONSTANTS
@@ -462,7 +459,7 @@ def load_policy_local(ckpt_dir: Path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="records/throws/fs_TRAIN_READY")
-    ap.add_argument("--ckpt", default="outputs/train/2026-02-17/19-39-39_gym_manipulator_act/checkpoints/200000")
+    ap.add_argument("--ckpt", default="outputs/train/2026-02-17/19-39-39_gym_manipulator_act/checkpoints/190000")
     ap.add_argument("--seed_index", type=int, default=0)
     ap.add_argument("--job_out", default="/tmp/wurf_job.json")
     ap.add_argument("--result_out", default="/tmp/throw_result.json")
@@ -487,6 +484,11 @@ def main():
     ap.add_argument("--ik-speed", type=float, default=1.0)
     ap.add_argument("--ik-acc", type=float, default=1.0)
 
+    # cup warp (optional, measured mm -> true mm)
+    ap.add_argument("--warp-npz", type=str, default="",
+                    help="Path to cup_warp .npz (cx/cy coeffs). "
+                         "If empty, auto-detects koordinaten/H_fixed.npz or koordinaten/cup_warp.npz")
+
     # cup area bounds
     ap.add_argument("--cup-area-x-min", type=float, default=-100.0)
     ap.add_argument("--cup-area-x-max", type=float, default=600.0)
@@ -506,13 +508,34 @@ def main():
     mapper = TableToRobot(os.path.expanduser(args.table_to_robot_yaml))
 
     # homography + optional cup warp
-    coord_dir = repo_root / "koordinaten"
+    coord_dir = repo_root / "calibrate/"
     H_path = coord_dir / args.H if not Path(args.H).is_absolute() else Path(args.H)
-    H_fixed_npz = coord_dir / "H_fixed.npz"
     if not H_path.exists():
         raise RuntimeError(f"H file not found: {H_path}")
 
-    cup_warp_npz = str(H_fixed_npz) if H_fixed_npz.exists() else None
+    # Determine cup warp path: explicit arg > auto-detect candidates
+    if args.warp_npz:
+        warp_candidate = Path(args.warp_npz)
+        if not warp_candidate.is_absolute():
+            warp_candidate = coord_dir / args.warp_npz
+        if not warp_candidate.exists():
+            raise RuntimeError(f"--warp-npz file not found: {warp_candidate.resolve()}")
+        cup_warp_npz = str(warp_candidate)
+        print(f"[WARP] Using explicit warp file: {cup_warp_npz}")
+    else:
+        # Auto-detect: try H_fixed.npz and cup_warp.npz
+        _candidates = [coord_dir / "H_fixed.npz", coord_dir / "cup_warp.npz"]
+        cup_warp_npz = None
+        for _c in _candidates:
+            if _c.exists():
+                cup_warp_npz = str(_c)
+                print(f"[WARP] Auto-detected warp file: {cup_warp_npz}")
+                break
+        if cup_warp_npz is None:
+            print(f"[WARP] WARNING: No warp file found in {coord_dir} "
+                  f"(checked: {[c.name for c in _candidates]}). "
+                  "Cup coordinates will NOT be warped. "
+                  "Pass --warp-npz <path> to enable.")
 
     camera = LiveCamera(
         cam_idx=args.cam,
@@ -684,7 +707,21 @@ def main():
             pos1 = [float(v) for v in pred[0:6].tolist()]
             pos2 = [float(v) for v in pred[6:12].tolist()]
             release_at = float(pred[12].item())
+
+            # ----- step bias: ab x>=200 alle +100mm => -0.03 -----
+            x_mm = float(target_xy[0].item())
+
+            if x_mm < 200.0:
+                steps = 0
+                delta = 0.0
+            else:
+                steps = int((x_mm - 200.0) // 100.0)   # 200..299 => 0, 300..399 => 1, ...
+                delta = -0.003 * steps                  # pro Schritt -0.03
+
+            release_at_raw = release_at
+            release_at = release_at_raw #+ delta
             release_at = max(0.05, min(0.95, release_at))
+
 
             release_joints = lerp(pos1, pos2, release_at)
             release_xyz = fk_tcp_xyz_mm(args.robot_ip, release_joints)

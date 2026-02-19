@@ -469,7 +469,8 @@ def main():
         
         coord_dir = repo_root / "koordinaten"
         ball_script = coord_dir / "ball_finder.py"
-        H_path = coord_dir / args.H if not Path(args.H).is_absolute() else Path(args.H)
+        calib_dir = repo_root / "calibrate"
+        H_path = calib_dir / args.H if not Path(args.H).is_absolute() else Path(args.H)
         
         if not ball_script.exists():
             raise RuntimeError(f"ball_finder.py not found: {ball_script}")
@@ -526,8 +527,8 @@ def main():
         # ====================================================================
         coord_dir = repo_root / "koordinaten"
         cups_script = coord_dir / "cups_yolo.py"
-        H_path = coord_dir / args.H if not Path(args.H).is_absolute() else Path(args.H)
-        H_fixed_npz = coord_dir / "H_fixed.npz"
+        H_path = calib_dir / args.H if not Path(args.H).is_absolute() else Path(args.H)
+        H_fixed_npz = calib_dir / "H_fixed.npz"
 
         if not cups_script.exists():
             raise RuntimeError(f"cups_yolo.py not found: {cups_script}")
