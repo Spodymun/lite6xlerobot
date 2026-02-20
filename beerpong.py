@@ -459,7 +459,9 @@ def load_policy_local(ckpt_dir: Path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="records/throws/fs_TRAIN_READY")
-    ap.add_argument("--ckpt", default="outputs/train/2026-02-17/19-39-39_gym_manipulator_act/checkpoints/190000")
+    ap.add_argument("--ckpt", default="outputs/train/2026-02-17/19-39-39_gym_manipulator_act/checkpoints/200000")
+    #outputs/train/2026-02-17/19-39-39_gym_manipulator_act/checkpoints/200000
+    #outputs/train/2026-02-19/19-14-57_gym_manipulator_act/checkpoints/020000
     ap.add_argument("--seed_index", type=int, default=0)
     ap.add_argument("--job_out", default="/tmp/wurf_job.json")
     ap.add_argument("--result_out", default="/tmp/throw_result.json")
@@ -474,7 +476,7 @@ def main():
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--ball-timeout-s", type=float, default=15.0)
     ap.add_argument("--cup-timeout-s", type=float, default=15.0)
-    ap.add_argument("--ball-stability-checks", type=int, default=5)
+    ap.add_argument("--ball-stability-checks", type=int, default=3)
 
     # mapping + pick
     ap.add_argument("--table-to-robot-yaml", type=str, default="calibrate/table_to_robot.yaml")
@@ -708,19 +710,7 @@ def main():
             pos2 = [float(v) for v in pred[6:12].tolist()]
             release_at = float(pred[12].item())
 
-            # ----- step bias: ab x>=200 alle +100mm => -0.03 -----
-            x_mm = float(target_xy[0].item())
-
-            if x_mm < 200.0:
-                steps = 0
-                delta = 0.0
-            else:
-                steps = int((x_mm - 200.0) // 100.0)   # 200..299 => 0, 300..399 => 1, ...
-                delta = -0.003 * steps                  # pro Schritt -0.03
-
-            release_at_raw = release_at
-            release_at = release_at_raw #+ delta
-            release_at = max(0.05, min(0.95, release_at))
+            release_at = max(0.69, min(0.895, release_at))
 
 
             release_joints = lerp(pos1, pos2, release_at)
