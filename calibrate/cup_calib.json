@@ -2,18 +2,18 @@
   {"x_true": 0, "y_true": 720,   "x_meas": -60.5,  "y_meas": 820},
   {"x_true": 0, "y_true": 540,   "x_meas": -50.5, "y_meas": 580},
   {"x_true": 0, "y_true": 360,   "x_meas": -40.5, "y_meas": 370},
-  {"x_true": 0, "y_true": 180,   "x_meas": -30.5, "y_meas": 170},
-  {"x_true": 0, "y_true": 0,   "x_meas": -30.5, "y_meas": -10},
+  {"x_true": 0, "y_true": 180,   "x_meas": -30.5, "y_meas": 160},
+  {"x_true": 0, "y_true": 0,   "x_meas": -30.5, "y_meas": -30},
 
   {"x_true": 250, "y_true": 720,   "x_meas": 245,  "y_meas": 820},
   {"x_true": 250, "y_true": 540,   "x_meas": 235, "y_meas": 580},
   {"x_true": 250, "y_true": 360,   "x_meas": 225, "y_meas": 370},
-  {"x_true": 250, "y_true": 180,   "x_meas": 215, "y_meas": 170},
-  {"x_true": 250, "y_true": 0,   "x_meas": 210, "y_meas": -10},
+  {"x_true": 250, "y_true": 180,   "x_meas": 215, "y_meas": 160},
+  {"x_true": 250, "y_true": 0,   "x_meas": 210, "y_meas": -30},
 
   {"x_true": 500, "y_true": 720,   "x_meas": 525,  "y_meas": 820},
   {"x_true": 500, "y_true": 540,   "x_meas": 520, "y_meas": 580},
   {"x_true": 500, "y_true": 360,   "x_meas": 510, "y_meas": 370},
-  {"x_true": 500, "y_true": 180,   "x_meas": 510, "y_meas": 170},
-  {"x_true": 500, "y_true": 0,   "x_meas": 510, "y_meas": -10}
+  {"x_true": 500, "y_true": 180,   "x_meas": 510, "y_meas": 160},
+  {"x_true": 500, "y_true": 0,   "x_meas": 510, "y_meas": -30}
 ]
