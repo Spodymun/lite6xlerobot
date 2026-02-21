@@ -459,9 +459,7 @@ def load_policy_local(ckpt_dir: Path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="records/throws/fs_TRAIN_READY")
-    ap.add_argument("--ckpt", default="outputs/train/2026-02-17/19-39-39_gym_manipulator_act/checkpoints/200000")
-    #outputs/train/2026-02-17/19-39-39_gym_manipulator_act/checkpoints/200000
-    #outputs/train/2026-02-19/19-14-57_gym_manipulator_act/checkpoints/020000
+    ap.add_argument("--ckpt", default="outputs/train/2026-02-17/19-39-39_gym_manipulator_act/checkpoints/010000")
     ap.add_argument("--seed_index", type=int, default=0)
     ap.add_argument("--job_out", default="/tmp/wurf_job.json")
     ap.add_argument("--result_out", default="/tmp/throw_result.json")
@@ -710,7 +708,7 @@ def main():
             pos2 = [float(v) for v in pred[6:12].tolist()]
             release_at = float(pred[12].item())
 
-            release_at = max(0.69, min(0.895, release_at))
+            release_at = max(0.69, min(0.89, release_at))
 
 
             release_joints = lerp(pos1, pos2, release_at)

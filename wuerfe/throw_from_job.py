@@ -140,7 +140,7 @@ def main():
     pos1 = job.get("pos1", None)
     pos2 = job.get("pos2", None)
     release_xyz_cmd = safe_xyz(job.get("release_xyz", None))
-    tol = float(job.get("xyz_tolerance_mm", 5.0)) # aktuell nicht genutzt
+    tol = float(job.get("xyz_tolerance_mm", 3.5)) # aktuell nicht genutzt
     tol = 4.0 # hardcoded for now, da release sphere trigger am Arm ist und nicht super genau sein muss; und wir wollen konsistente Werte für Analyse
 
     if pos1 is None or pos2 is None:
