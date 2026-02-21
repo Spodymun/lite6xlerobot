@@ -1,0 +1,208 @@
+Klar. Hier sind zwei saubere Terminal-Skripte (jeweils ein Befehl), die du 1:1 in deine Arbeit übernehmen kannst:
+
+A) Batch-Test aller Checkpoints (Ranking / “best interpoliert”)
+
+B) Detail-Sweep (alle Schritte einzeln, inkl. Δ pro Step) für einen Checkpoint
+
+Beide sind so geschrieben, dass du oben nur ein paar Variablen anpasst.
+
+A) Alle Checkpoints testen + Ranking ausgeben (global + optional MID-Band)
+python3 - <<'PY'
+import numpy as np
+import torch
+from pathlib import Path
+
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.policies.act.modeling_act import ACTPolicy
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+# =========================
+# CONFIG (ANPASSEN)
+# =========================
+RUN_DIR = Path("outputs/train/2026-02-21/13-48-03_gym_manipulator_act/checkpoints")
+ROOT = "records/throws/fs_TRAIN_READY"
+REPO_ID = "local/xarm_throws_fixed"
+SEED_INDEX = 0
+
+X_LIST = [0.0, 250.0, 500.0]     # welche X testen
+EPS_PLATEAU = 1e-3               # Plateau-Schwelle |Δ| < EPS
+
+# global sweep
+GY_MIN, GY_MAX, GY_STEP = 0, 720, 20
+
+# mid sweep (optional – sehr nützlich für dein Problem)
+DO_MID = True
+MY_MIN, MY_MAX, MY_STEP = 280, 480, 10
+
+# =========================
+# LOAD DATA ONCE
+# =========================
+ds = LeRobotDataset(repo_id=REPO_ID, root=ROOT)
+x = ds[SEED_INDEX]
+state = x["observation.state"].float().unsqueeze(0)
+env_template = x["observation.environment_state"].float().clone()
+if env_template.numel() != 9:
+    raise RuntimeError(f"Expected env_state 9D, got {env_template.numel()}")
+
+def make_env(x_mm, y_mm):
+    env = env_template.clone()
+    env[4] = float(x_mm); env[5] = float(y_mm)
+    env[7] = float(x_mm); env[8] = float(y_mm)
+    return env
+
+def load_policy(ckpt_dir: Path):
+    pm = ckpt_dir / "pretrained_model" if (ckpt_dir / "pretrained_model").is_dir() else ckpt_dir
+    cfg = PreTrainedConfig.from_pretrained(str(pm))
+    policy = ACTPolicy.from_pretrained(str(pm), config=cfg)
+    policy.eval()
+    return policy
+
+def infer_pos1_0(policy, x_mm, y_mm):
+    env = make_env(x_mm, y_mm)
+    with torch.no_grad():
+        out = policy.model({"observation.state": state, "observation.environment_state": env.unsqueeze(0)})
+        a = out[0] if isinstance(out, tuple) else out
+        a = a[0,0] if a.dim() == 3 else a[0]
+    return float(a[0].item())
+
+def metrics(vals):
+    v = np.array(vals, dtype=np.float64)
+    d = np.diff(v)
+    ad = np.abs(d)
+    max_jump = float(ad.max()) if ad.size else 0.0
+    tv = float(ad.sum())
+    plateau = float((ad < EPS_PLATEAU).mean()) if ad.size else 1.0
+    return max_jump, tv, plateau
+
+def score_ckpt(policy, y_min, y_max, y_step):
+    ys = list(range(y_min, y_max + 1, y_step))
+    max_jumps, tvs, plats = [], [], []
+    for X in X_LIST:
+        curve = [infer_pos1_0(policy, X, y) for y in ys]
+        mj, tv, pl = metrics(curve)
+        max_jumps.append(mj); tvs.append(tv); plats.append(pl)
+    return {
+        "max_jump_max": float(np.max(max_jumps)),
+        "max_jump_avg": float(np.mean(max_jumps)),
+        "plateau_pct_avg": float(100*np.mean(plats)),
+        "tv_avg": float(np.mean(tvs)),
+    }
+
+# =========================
+# FIND CHECKPOINTS
+# =========================
+ckpts = [p for p in sorted(RUN_DIR.iterdir()) if p.is_dir() and p.name.isdigit()]
+if not ckpts:
+    raise SystemExit(f"No numeric checkpoints found in {RUN_DIR}")
+
+print("Found checkpoints:", [c.name for c in ckpts])
+print("X_LIST:", X_LIST)
+print()
+
+rows_global = []
+rows_mid = []
+
+for ckpt in ckpts:
+    try:
+        policy = load_policy(ckpt)
+    except Exception as e:
+        print(f"[SKIP] {ckpt.name}: load failed: {e}")
+        continue
+
+    g = score_ckpt(policy, GY_MIN, GY_MAX, GY_STEP)
+    g["ckpt"] = ckpt.name
+    rows_global.append(g)
+
+    if DO_MID:
+        m = score_ckpt(policy, MY_MIN, MY_MAX, MY_STEP)
+        m["ckpt"] = ckpt.name
+        rows_mid.append(m)
+
+def sort_key(r):
+    # best: minimaler worst jump, minimal plateau, maximal tv (weniger flach)
+    return (r["max_jump_max"], r["plateau_pct_avg"], -r["tv_avg"])
+
+rows_global.sort(key=sort_key)
+if DO_MID:
+    rows_mid.sort(key=sort_key)
+
+print(f"=== GLOBAL SCORE Y={GY_MIN}..{GY_MAX} step={GY_STEP} ===")
+print("ckpt   max_jump_max  max_jump_avg  plateau%_avg   tv_avg")
+for r in rows_global[:15]:
+    print(f"{r['ckpt']:>6}  {r['max_jump_max']:.6f}    {r['max_jump_avg']:.6f}     {r['plateau_pct_avg']:.1f}%      {r['tv_avg']:.4f}")
+
+if DO_MID:
+    print(f"\n=== MID SCORE Y={MY_MIN}..{MY_MAX} step={MY_STEP} ===")
+    print("ckpt   max_jump_max  max_jump_avg  plateau%_avg   tv_avg")
+    for r in rows_mid[:15]:
+        print(f"{r['ckpt']:>6}  {r['max_jump_max']:.6f}    {r['max_jump_avg']:.6f}     {r['plateau_pct_avg']:.1f}%      {r['tv_avg']:.4f}")
+PY
+
+Was du im Paper/Report erklären kannst:
+
+max_jump_max = größter Diskontinuitäts-Sprung (Mode-Switch Indikator)
+
+plateau% = Anteil nahezu flacher Schritte (Dead-Zone Indikator)
+
+tv_avg = Gesamtbewegung (zu klein ⇒ überglättet / zu flach)
+
+B) “Alle Stufenschritte einzeln sehen” (Detail-Sweep + Δ pro Schritt)
+
+Damit bekommst du genau diese Ausgabe wie du gepostet hast (d=...) — für einen Checkpoint, eine X-Linie, ein Y-Band.
+
+python3 - <<'PY'
+import torch
+from pathlib import Path
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.policies.act.modeling_act import ACTPolicy
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+# =========================
+# CONFIG (ANPASSEN)
+# =========================
+ROOT="records/throws/fs_TRAIN_READY"
+REPO_ID="local/xarm_throws_fixed"
+SEED_INDEX=0
+
+CKPT=Path("outputs/train/2026-02-21/13-48-03_gym_manipulator_act/checkpoints/007000")
+X_LIST=[0.0, 250.0, 500.0]
+
+Y_MIN, Y_MAX, Y_STEP = 0, 720, 20
+# Beispiel für feines Band:
+# Y_MIN, Y_MAX, Y_STEP = 280, 480, 10
+# oder super fein um eine Kante:
+# Y_MIN, Y_MAX, Y_STEP = 280, 340, 2
+
+# =========================
+# LOAD POLICY + DATA
+# =========================
+pm = CKPT/"pretrained_model" if (CKPT/"pretrained_model").is_dir() else CKPT
+print("Using:", pm)
+
+cfg=PreTrainedConfig.from_pretrained(str(pm))
+policy=ACTPolicy.from_pretrained(str(pm), config=cfg); policy.eval()
+
+ds=LeRobotDataset(repo_id=REPO_ID, root=ROOT)
+x=ds[SEED_INDEX]
+state=x["observation.state"].float().unsqueeze(0)
+envt=x["observation.environment_state"].float().clone()
+
+def infer_pos1_0(X, y):
+    env=envt.clone()
+    env[4]=float(X); env[5]=float(y)
+    env[7]=float(X); env[8]=float(y)
+    with torch.no_grad():
+        out=policy.model({"observation.state": state, "observation.environment_state": env.unsqueeze(0)})
+        a=out[0] if isinstance(out, tuple) else out
+        a=a[0,0] if a.dim()==3 else a[0]
+    return float(a[0])
+
+for X in X_LIST:
+    print(f"\n--- X={X} | Y={Y_MIN}..{Y_MAX} step{Y_STEP} ---")
+    prev=None
+    for y in range(Y_MIN, Y_MAX+1, Y_STEP):
+        v=infer_pos1_0(X, y)
+        dv=0.0 if prev is None else v-prev
+        print(f"y={y:3d} pos1[0]={v: .5f}  d={dv:+.5f}")
+        prev=v
+PY

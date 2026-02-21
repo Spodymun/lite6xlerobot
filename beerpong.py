@@ -459,7 +459,7 @@ def load_policy_local(ckpt_dir: Path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="records/throws/fs_TRAIN_READY")
-    ap.add_argument("--ckpt", default="outputs/train/2026-02-17/19-39-39_gym_manipulator_act/checkpoints/010000")
+    ap.add_argument("--ckpt", default="outputs/train/2026-02-21/13-48-03_gym_manipulator_act/checkpoints/007000")
     ap.add_argument("--seed_index", type=int, default=0)
     ap.add_argument("--job_out", default="/tmp/wurf_job.json")
     ap.add_argument("--result_out", default="/tmp/throw_result.json")
