@@ -474,7 +474,7 @@ def main():
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--ball-timeout-s", type=float, default=15.0)
     ap.add_argument("--cup-timeout-s", type=float, default=15.0)
-    ap.add_argument("--ball-stability-checks", type=int, default=3)
+    ap.add_argument("--ball-stability-checks", type=int, default=5)
 
     # mapping + pick
     ap.add_argument("--table-to-robot-yaml", type=str, default="calibrate/table_to_robot.yaml")
